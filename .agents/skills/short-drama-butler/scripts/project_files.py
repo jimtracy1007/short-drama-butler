@@ -15,6 +15,11 @@ from extract_docx_text import extract_text
 
 
 KIND_PREFIXES = {"characters": "C", "scenes": "S", "props": "P"}
+KEYFRAME_STRATEGIES = {
+    "start_only": ("首帧", ["start"]),
+    "start_end": ("首帧、尾帧", ["start", "end"]),
+    "start_middle_end": ("首帧、过程帧、尾帧", ["start", "middle", "end"]),
+}
 EPISODE_OVERRIDE_KEYS = {
     "audience",
     "format",
@@ -459,6 +464,148 @@ def _write_episode_state(episode_dir: Path, state: dict[str, Any]) -> None:
     _episode_state_path(episode_dir).write_text(
         json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+
+
+def record_script_and_storyboard_approval(project_root: Path, episode_id: str) -> Path:
+    """Record the user's approval of the current formal script and storyboard."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    missing = [name for name in ("formal-script.md", "storyboard.md") if not (episode_dir / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"确认前缺少：{', '.join(missing)}")
+    state = _read_episode_state(episode_dir)
+    approved_at = datetime.now(timezone.utc).isoformat()
+    state["script_and_storyboard_status"] = "user_confirmed"
+    state["script_and_storyboard_confirmed_at"] = approved_at
+    state.pop("keyframe_plan_status", None)
+    _write_episode_state(episode_dir, state)
+    review_path = episode_dir / "creative-review.md"
+    review_path.write_text(
+        f"# {episode_id} 剧本与分镜确认记录\n\n"
+        "- 状态：已确认\n"
+        f"- 确认时间：{approved_at}\n"
+        "- 已确认文件：`formal-script.md`、`storyboard.md`\n"
+        "- 下一步：先生成并让用户确认 `keyframe-plan.md`；未确认关键帧方案前不得出图。\n",
+        encoding="utf-8",
+    )
+    return review_path
+
+
+def _validate_keyframe_shots(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not shots:
+        raise ValueError("关键帧方案至少需要一个镜头")
+    validated: list[dict[str, Any]] = []
+    shot_ids: set[str] = set()
+    for shot in shots:
+        shot_id = str(shot.get("shot_id", "")).strip()
+        action = str(shot.get("action", "")).strip()
+        strategy = str(shot.get("strategy", "")).strip()
+        try:
+            duration_seconds = float(shot.get("duration_seconds", 0))
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"镜头 {shot_id or '（未编号）'} 的时长必须为正数") from error
+        if not shot_id or not action:
+            raise ValueError("每个镜头都需要镜号和动作说明")
+        if shot_id in shot_ids:
+            raise ValueError(f"关键帧方案存在重复镜号：{shot_id}")
+        if duration_seconds <= 0:
+            raise ValueError(f"镜头 {shot_id} 的时长必须为正数")
+        if strategy not in KEYFRAME_STRATEGIES:
+            choices = "、".join(KEYFRAME_STRATEGIES)
+            raise ValueError(f"镜头 {shot_id} 的关键帧策略无效；可选：{choices}")
+        shot_ids.add(shot_id)
+        label, frame_kinds = KEYFRAME_STRATEGIES[strategy]
+        validated.append(
+            {
+                "shot_id": shot_id,
+                "duration_seconds": duration_seconds,
+                "action": action,
+                "strategy": strategy,
+                "strategy_label": label,
+                "frames": frame_kinds,
+            }
+        )
+    return validated
+
+
+def create_keyframe_plan(project_root: Path, episode_id: str, shots: list[dict[str, Any]]) -> Path:
+    """Create a user-reviewable per-shot keyframe plan after script and storyboard approval."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    state = _read_episode_state(episode_dir)
+    if state.get("script_and_storyboard_status") != "user_confirmed":
+        raise ValueError("剧本和分镜尚未获用户确认，不能规划关键帧")
+    validated_shots = _validate_keyframe_shots(shots)
+    manifest = {
+        "episode_id": episode_id,
+        "status": "user_pending",
+        "shots": validated_shots,
+    }
+    (episode_dir / "keyframe-manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    total_frames = sum(len(shot["frames"]) for shot in validated_shots)
+    rows = "\n".join(
+        f"| {shot['shot_id']} | {shot['duration_seconds']:g} 秒 | {len(shot['frames'])} 张（{shot['strategy_label']}） | {shot['action']} |"
+        for shot in validated_shots
+    )
+    plan_path = episode_dir / "keyframe-plan.md"
+    plan_path.write_text(
+        f"# {episode_id} 关键帧方案\n\n"
+        "- 状态：待用户确认\n"
+        f"- 镜头数：{len(validated_shots)}\n"
+        f"- 计划关键帧总数：{total_frames}\n"
+        "- 前置条件：`formal-script.md` 与 `storyboard.md` 已获用户确认。\n"
+        "- 规则：确认本方案前不得生成关键帧；若要调整剧本、分镜或每镜帧数，先改本方案再确认。\n\n"
+        "| 镜号 | 时长 | 关键帧数量与类型 | 图生视频要表达的单一动作 |\n"
+        "| --- | ---: | --- | --- |\n"
+        f"{rows}\n\n"
+        "## 如何选择帧数\n\n"
+        "- 首帧：静态构图、轻表情或很短的单一动作。\n"
+        "- 首帧、尾帧：角色/镜头有明确位移、物体移动、情绪明显变化，或镜头约 5—8 秒。\n"
+        "- 首帧、过程帧、尾帧：分阶段动作、变形/魔法、复杂走位、重要情节转折，或较长镜头。\n"
+        "- 超过三张只在每一张都代表清晰阶段、且所用图生视频工具支持多参考帧时采用；不要用近似重复图堆数量。\n",
+        encoding="utf-8",
+    )
+    state["keyframe_plan_status"] = "user_pending"
+    state["keyframe_plan_path"] = "keyframe-plan.md"
+    _write_episode_state(episode_dir, state)
+    return plan_path
+
+
+def approve_keyframe_plan(project_root: Path, episode_id: str) -> Path:
+    """Mark the current per-shot keyframe plan user-confirmed and ready for image production."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    manifest_path = episode_dir / "keyframe-manifest.json"
+    plan_path = episode_dir / "keyframe-plan.md"
+    if not manifest_path.is_file() or not plan_path.is_file():
+        raise FileNotFoundError("本集尚未创建关键帧方案")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("status") != "user_pending":
+        raise ValueError("关键帧方案当前不能确认")
+    approved_at = datetime.now(timezone.utc).isoformat()
+    manifest["status"] = "user_confirmed"
+    manifest["confirmed_at"] = approved_at
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    contents = plan_path.read_text(encoding="utf-8")
+    plan_path.write_text(contents.replace("- 状态：待用户确认", "- 状态：已确认", 1), encoding="utf-8")
+    state = _read_episode_state(episode_dir)
+    state["keyframe_plan_status"] = "user_confirmed"
+    state["keyframe_plan_confirmed_at"] = approved_at
+    _write_episode_state(episode_dir, state)
+    return plan_path
+
+
+def assert_keyframe_generation_allowed(project_root: Path, episode_id: str) -> bool:
+    """Prevent image generation until both the story review and frame-count review are approved."""
+    episode_dir = _episode_directory(project_root.resolve(), episode_id)
+    state = _read_episode_state(episode_dir)
+    if state.get("script_and_storyboard_status") != "user_confirmed":
+        raise ValueError("剧本和分镜尚未获用户确认，不能生成关键帧")
+    if state.get("keyframe_plan_status") != "user_confirmed":
+        raise ValueError("关键帧方案尚未获用户确认，不能生成关键帧")
+    return True
 
 
 def _write_episode_assets_file(episode_dir: Path, assets_by_id: dict[str, dict[str, Any]], state: dict[str, Any]) -> None:

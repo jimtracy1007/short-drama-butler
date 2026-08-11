@@ -21,6 +21,8 @@ description: Use when initializing, organizing, migrating, or maintaining an AI 
 | 整理/新增素材 | 以名称、别名、类别、范围和图片路径登记素材；内部自动维护 `Cxx`、`Sxx`、`Pxx`，默认新素材仅限本集。 |
 | 创建一集 | 创建剧情需求、本集状态、素材清单与交接包。 |
 | 生产本集资产 | 在大纲确认后，生成 `asset-production-plan.md` 和出图提示词；确认图片后再登记资产。 |
+| 审核剧本与分镜 | 展示正式剧本和分镜，等待用户确认或按反馈修改；未经确认不得规划关键帧。 |
+| 规划 / 生成关键帧 | 逐镜列出首帧、尾帧、过程帧的数量和用途，等待用户确认方案后才使用图片工具出图。 |
 | 结束一集 / 继续下一集 | 本集定稿后确认连续性记录；创建下一集时自动继承最近一份已确认记录。 |
 | 交给分镜 | 生成/更新 `storyboard-package.md`，随后调用 `$seedance-storyboard-generator`。 |
 | 审核/提升素材 | 确认剧集素材可跨集复用后，迁入全局库并更新索引。 |
@@ -62,6 +64,18 @@ description: Use when initializing, organizing, migrating, or maintaining an AI 
 4. 确认资产已进入更新后的交接包后，再写正式剧本、镜头表和关键帧提示词。
 
 未确认的生产单只能作为待生成草案，不能被分镜当作已锁定视觉素材。
+
+## 剧本、分镜与关键帧关口
+
+正式剧本和镜头表完成后，必须先展示二者并询问用户是否符合要求、是否要调整；收到明确确认后调用 `record_script_and_storyboard_approval` 写入 `creative-review.md`。没有这项确认，不得调用 `create_keyframe_plan`，更不得使用图片工具生成关键帧。
+
+随后按每镜的实际动作、镜头时长和叙事重要性创建 `keyframe-plan.md`：
+
+- `start_only`：静态构图、轻表情或很短的单一动作；只需首帧。
+- `start_end`：有明确位移、对象移动、镜头推进后的状态变化，或约 5—8 秒的镜头；需首帧和尾帧。
+- `start_middle_end`：分阶段动作、变形/魔法、复杂走位、重要转折或较长镜头；需首帧、过程帧、尾帧。
+
+先展示逐镜帧数与每帧用途，等待用户确认。收到确认后调用 `approve_keyframe_plan`；只有 `assert_keyframe_generation_allowed` 成功时才可生成关键帧。多帧的价值来自清晰的阶段差异和工具支持，不得用近似重复图凑数量；同一镜的图片应明确标注为首 / 过程 / 尾帧，便于交给图生视频工具。
 
 交接包模板和必含字段见 [references/storyboard-handoff.md](references/storyboard-handoff.md)。
 与 Seedance Storyboard Generator 或其他分镜 Skill 的覆盖规则见 [references/seedance-integration-protocol.md](references/seedance-integration-protocol.md)。

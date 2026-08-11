@@ -47,6 +47,9 @@ templates/                        新建资料时使用的模板
 | `episode-assets.md` | 创建这一集时 | “现在有哪些已确认资产？还缺哪些？” | 参考；新增草案不能当锁定资产。 |
 | `asset-production-plan.md` | 大纲确认后且有新增资产时 | “新增角色、场景、道具的图什么时候、按什么标准制作？” | 用于图片生产；不是分镜输入。 |
 | `asset-production-manifest.json` | 创建资产生产单时 | “每项计划资产的状态和预留图片路径是什么？” | 供 Agent / 工具更新；状态依次为 `planned → image_provided → user_confirmed → registered`。 |
+| `creative-review.md` | 用户确认正式剧本与分镜后 | “当前剧本与分镜可以进入关键帧阶段吗？” | 第一确认关口；必须同时存在 `formal-script.md` 与 `storyboard.md`。 |
+| `keyframe-plan.md` | 剧本与分镜确认后 | “每镜需要首帧、尾帧还是过程帧，一共几张？” | 用户确认的逐镜出图计划；未确认不能生成关键帧。 |
+| `keyframe-manifest.json` | 创建关键帧方案时 | “关键帧方案的确认状态与每镜帧类型是什么？” | 供 Agent / 工具执行；状态为 `user_pending → user_confirmed`。 |
 | `storyboard-package.md` | 创建这一集时，及资产确认后更新 | “分镜 Skill 必须遵守什么？” | 是。它是本集唯一正式交接包。 |
 
 ## 资产从想法到可用图片
@@ -64,6 +67,22 @@ asset-index.json：登记为已确认资产
         ↓
 storyboard-package.md：作为锁定素材交给分镜
 ```
+
+## 从分镜到关键帧
+
+```text
+正式剧本 + 分镜表完成
+        ↓
+用户确认：creative-review.md
+        ↓
+keyframe-plan.md：逐镜决定首 / 过程 / 尾帧
+        ↓
+用户确认：keyframe-manifest.json
+        ↓
+生成并归档关键帧，再交给图生视频工具
+```
+
+关键帧默认按镜号和帧类型命名，例如 `KF07-start`、`KF07-middle`、`KF07-end`。只有一个静态或短动作时只需要 `start`；位移或状态变化建议增加 `end`；分阶段、长动作或叙事关键镜头再增加 `middle`。多帧必须对应真实动作阶段，不能以近似重复图片凑数。
 
 新资产默认范围为 `episode-<ID>`。用户确认可复用后，才移动到 `global` 或 `season-<N>`；其名称和别名始终是用户面对的操作方式，`Cxx`、`Sxx`、`Pxx` 只供系统内部索引。
 

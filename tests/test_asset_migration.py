@@ -20,15 +20,19 @@ from asset_migration import (  # noqa: E402
 )
 from project_files import (  # noqa: E402
     build_asset_index,
+    approve_keyframe_plan,
+    assert_keyframe_generation_allowed,
     confirm_episode_asset,
     create_asset_production_plan,
     create_episode,
+    create_keyframe_plan,
     initialize_project,
     register_asset,
     register_project_asset,
     record_episode_continuity,
     provide_episode_asset_image,
     provide_episode_asset_images,
+    record_script_and_storyboard_approval,
     resolve_asset_references,
     write_asset_index,
 )
@@ -150,6 +154,47 @@ class AssetMigrationTests(unittest.TestCase):
         self.assertEqual(index[0]["destination"], "assets/global/characters/C01_gulu/front.png")
         self.assertEqual([view["variant"] for view in index[0]["views"]], ["front", "back"])
         self.assertEqual(index[0]["aliases"], ["小怪兽"])
+
+    def test_keyframe_plan_requires_two_user_approval_gates_and_keeps_per_shot_frame_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None, frame_format="16:9", episode_target_seconds=120)
+            create_episode(root, "EP001", "海边新朋友", "咕噜帮助小螃蟹回海。", [])
+            episode_dir = root / "episodes/EP001_海边新朋友"
+            (episode_dir / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
+            (episode_dir / "storyboard.md").write_text("# 分镜表\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "剧本和分镜"):
+                create_keyframe_plan(
+                    root,
+                    "EP001",
+                    [
+                        {"shot_id": "01", "duration_seconds": 4, "action": "咕噜看向海面", "strategy": "start_only"},
+                        {"shot_id": "02", "duration_seconds": 7, "action": "小螃蟹沿水道回海", "strategy": "start_end"},
+                        {"shot_id": "03", "duration_seconds": 8, "action": "水道从沙坑连到大海", "strategy": "start_middle_end"},
+                    ],
+                )
+
+            record_script_and_storyboard_approval(root, "EP001")
+            plan_path = create_keyframe_plan(
+                root,
+                "EP001",
+                [
+                    {"shot_id": "01", "duration_seconds": 4, "action": "咕噜看向海面", "strategy": "start_only"},
+                    {"shot_id": "02", "duration_seconds": 7, "action": "小螃蟹沿水道回海", "strategy": "start_end"},
+                    {"shot_id": "03", "duration_seconds": 8, "action": "水道从沙坑连到大海", "strategy": "start_middle_end"},
+                ],
+            )
+            contents = plan_path.read_text(encoding="utf-8")
+            self.assertIn("状态：待用户确认", contents)
+            self.assertIn("| 01 | 4 秒 | 1 张（首帧）", contents)
+            self.assertIn("| 02 | 7 秒 | 2 张（首帧、尾帧）", contents)
+            self.assertIn("| 03 | 8 秒 | 3 张（首帧、过程帧、尾帧）", contents)
+            with self.assertRaisesRegex(ValueError, "关键帧方案"):
+                assert_keyframe_generation_allowed(root, "EP001")
+
+            approve_keyframe_plan(root, "EP001")
+            self.assertTrue(assert_keyframe_generation_allowed(root, "EP001"))
 
     def test_handoff_explicitly_overrides_storyboard_generator_short_form_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -401,6 +446,7 @@ class AssetMigrationTests(unittest.TestCase):
         project_files = (
             repository_root / ".agents/skills/short-drama-butler/references/project-files.md"
         ).read_text(encoding="utf-8")
+        todo = (repository_root / "TODO.md").read_text(encoding="utf-8")
 
         for heading in (
             "## 先选一种使用方式",
@@ -409,6 +455,7 @@ class AssetMigrationTests(unittest.TestCase):
             "今天只做一集独立短剧",
             "继续做连续剧的下一集",
             "大纲里出现新角色或新场景",
+            "## 剧本与分镜确认后：再规划关键帧",
             "## 每个文件是做什么的",
         ):
             self.assertIn(heading, readme)
@@ -418,9 +465,14 @@ class AssetMigrationTests(unittest.TestCase):
             "episode-assets.md",
             "asset-production-plan.md",
             "asset-production-manifest.json",
+            "creative-review.md",
+            "keyframe-plan.md",
+            "keyframe-manifest.json",
             "storyboard-package.md",
         ):
             self.assertIn(filename, project_files)
+        self.assertIn("# 短剧管家待办", todo)
+        self.assertIn("关键帧与图生视频", todo)
 
     def test_asset_production_plan_is_created_after_outline_for_episode_only_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
