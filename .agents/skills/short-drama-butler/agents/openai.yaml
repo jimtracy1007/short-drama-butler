@@ -1,0 +1,4 @@
+interface:
+  display_name: "短剧管家"
+  short_description: "管理少儿短剧项目、素材、剧集、分镜与视频制作交接流程"
+  default_prompt: "使用 $short-drama-butler 初始化并整理当前少儿短剧项目。"

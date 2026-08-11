@@ -1,0 +1,456 @@
+{
+  "version": 1,
+  "created_at": "2026-08-11T04:25:26.299095+00:00",
+  "records": [
+    {
+      "source": "images/1-1-怪兽咕噜.png",
+      "destination": "assets/global/characters/C01_gulu/front.png",
+      "asset_id": "C01",
+      "kind": "characters",
+      "scope": "global",
+      "sha256": "b8fa9c6da776d6dffcf130a3f7ef7c9a632a700b03173fed926a3c4967cc2d33",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-怪兽咕噜-侧面.png",
+      "destination": "assets/global/characters/C01_gulu/side.png",
+      "asset_id": "C01",
+      "kind": "characters",
+      "scope": "global",
+      "sha256": "5b0baf194cde42cf0948c1b4b9da667bffd71562ef540323f7a753f82e51c04e",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-怪兽咕噜-背面.png",
+      "destination": "assets/global/characters/C01_gulu/back.png",
+      "asset_id": "C01",
+      "kind": "characters",
+      "scope": "global",
+      "sha256": "9421e4aed463c33ef5317c946b889016a9326ae2a8b6af3d5b58c223219c7f8e",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-泡泡队长.png",
+      "destination": "assets/global/characters/C02_bubble-captain/front.png",
+      "asset_id": "C02",
+      "kind": "characters",
+      "scope": "global",
+      "sha256": "094f23b218ecc3ab187881bfcb538abdb321d928b13324dc2e8670a01110a60d",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-泡泡队长-侧面.png",
+      "destination": "assets/global/characters/C02_bubble-captain/side.png",
+      "asset_id": "C02",
+      "kind": "characters",
+      "scope": "global",
+      "sha256": "b54d63c2e0b41070c1a286cd0c1a5949dc528e40cdedac785521f0391e3beb70",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-泡泡队长-背面.png",
+      "destination": "assets/global/characters/C02_bubble-captain/back.png",
+      "asset_id": "C02",
+      "kind": "characters",
+      "scope": "global",
+      "sha256": "92e80783b317d523b5c8c740fb1d93246230b4936d1786ec12dc14538d5dc7cd",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-怪事簿.png",
+      "destination": "assets/global/characters/C03_mystery-book/front.png",
+      "asset_id": "C03",
+      "kind": "characters",
+      "scope": "global",
+      "sha256": "1ea1ce3620cc71a7d7ecf61f2832a4ed9954d1eabb7c1e3ef6b9a2ef4571db95",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-怪事簿-侧面.png",
+      "destination": "assets/global/characters/C03_mystery-book/side.png",
+      "asset_id": "C03",
+      "kind": "characters",
+      "scope": "global",
+      "sha256": "211d863260a58f99472d64383657fc8cff6b51cc681f888f5760a3406601ec71",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-怪事簿-背面.png",
+      "destination": "assets/global/characters/C03_mystery-book/back.png",
+      "asset_id": "C03",
+      "kind": "characters",
+      "scope": "global",
+      "sha256": "3658f69d57a77321a1b6d79ccca030a05de0d8e56081c94fc15f6428dcf5adcd",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-咕噜妈妈.png",
+      "destination": "assets/global/characters/C04_gulu-mom/front.png",
+      "asset_id": "C04",
+      "kind": "characters",
+      "scope": "global",
+      "sha256": "381e1376af9a482bb415d7db65fcdc4d1f48351d99cb81f179f5f960ce6e9596",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-咕噜妈妈-表情.png",
+      "destination": "assets/global/characters/C04_gulu-mom/expression-sheet.png",
+      "asset_id": "C04",
+      "kind": "characters",
+      "scope": "global",
+      "sha256": "a6ac623d7ba096ddf5fa8a28a61d75359357d9d7e1e304fcc79644424797d0e3",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-咕噜爸爸.png",
+      "destination": "assets/pending/characters/C05_gulu-dad/front.png",
+      "asset_id": "C05",
+      "kind": "characters",
+      "scope": "pending",
+      "sha256": "50cf4d4bfe59fad48030bd8dba5fabc7b87a477f99267e5ebe1167669e104677",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-咕噜爸爸-侧面.png",
+      "destination": "assets/pending/characters/C05_gulu-dad/side.png",
+      "asset_id": "C05",
+      "kind": "characters",
+      "scope": "pending",
+      "sha256": "5bdd6027e9ceb615e8002e2b5c4d6419e26a206e3d32b95297d78b714f3479ac",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-1-咕噜爸爸-总表情.png",
+      "destination": "assets/pending/characters/C05_gulu-dad/expression-sheet.png",
+      "asset_id": "C05",
+      "kind": "characters",
+      "scope": "pending",
+      "sha256": "ee1b94e0bd4624cc80ef518cc7d13a88da4d6c72fd06d7940dac74a9b95340e1",
+      "status": "moved"
+    },
+    {
+      "source": "images/0-客餐.png",
+      "destination": "assets/global/scenes/S01_home-living/view-a.png",
+      "asset_id": "S01",
+      "kind": "scenes",
+      "scope": "global",
+      "sha256": "4c106647f8bf1cde5d905133306449d7b3c7e2392fc9b6f2d7c529fcdd0a6a83",
+      "status": "moved"
+    },
+    {
+      "source": "images/0-客餐厅-对向.png",
+      "destination": "assets/global/scenes/S01_home-living/reverse.png",
+      "asset_id": "S01",
+      "kind": "scenes",
+      "scope": "global",
+      "sha256": "04bd9c3ecbf01372446691dc4ad5ec71c74f5b477612b4f4dfca974022185f09",
+      "status": "moved"
+    },
+    {
+      "source": "images/0-小怪兽房间-对向视角.png",
+      "destination": "assets/global/scenes/S02_gulu-bedroom/reverse.png",
+      "asset_id": "S02",
+      "kind": "scenes",
+      "scope": "global",
+      "sha256": "d02454cab14471e2912b8097725f35a7db1bb234d114f1abe2d61e62d58b1aa4",
+      "status": "moved"
+    },
+    {
+      "source": "images/0-小怪兽房间-俯视.png",
+      "destination": "assets/global/scenes/S02_gulu-bedroom/top.png",
+      "asset_id": "S02",
+      "kind": "scenes",
+      "scope": "global",
+      "sha256": "693f6387a578e2d5ae34160bda8f6f01e84aafe5f4830e34fa7dd7ab3f635b93",
+      "status": "moved"
+    },
+    {
+      "source": "images/0-泡泡湾-白天.png",
+      "destination": "assets/global/scenes/S03_bubble-bay/day.png",
+      "asset_id": "S03",
+      "kind": "scenes",
+      "scope": "global",
+      "sha256": "bead25d3654500ab040e2de6cdf4f562ebf659b345b9429dc1f3621dc6a638cb",
+      "status": "moved"
+    },
+    {
+      "source": "images/0-泡泡湾-夜晚.png",
+      "destination": "assets/global/scenes/S03_bubble-bay/night.png",
+      "asset_id": "S03",
+      "kind": "scenes",
+      "scope": "global",
+      "sha256": "4083b5ff1a63f35877226c197b55810a5118cee1e085e79397a37814c784752b",
+      "status": "moved"
+    },
+    {
+      "source": "images/0-鞋柜-正面.png",
+      "destination": "assets/global/props/P01_shoe-cabinet/front.png",
+      "asset_id": "P01",
+      "kind": "props",
+      "scope": "global",
+      "sha256": "1253a944fba769d43e614999bf3dddefdb1b05873509d3245514c01c16d3c352",
+      "status": "moved"
+    },
+    {
+      "source": "images/0-鞋柜-侧面.png",
+      "destination": "assets/global/props/P01_shoe-cabinet/side.png",
+      "asset_id": "P01",
+      "kind": "props",
+      "scope": "global",
+      "sha256": "ebdbaaff20f3a0451f0dc6ea58c14bc71a291173b7e4d11674a76790f9b4f8ef",
+      "status": "moved"
+    },
+    {
+      "source": "images/0-水盆-正面.png",
+      "destination": "assets/global/props/P02_wash-basin/front.png",
+      "asset_id": "P02",
+      "kind": "props",
+      "scope": "global",
+      "sha256": "34673b4401f6a76b0bb1acd965607a967077edd20dd637d18a54242775845e13",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-2-泥巴怪.png",
+      "destination": "assets/episodes/episode-EP002/characters/C06_mud-monster/clean.png",
+      "asset_id": "C06",
+      "kind": "characters",
+      "scope": "episode-EP002",
+      "sha256": "ccdf6e103d15cc34929d48e94672a429fd2344bf0ee563f9ce278689dba430a2",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-2-泥巴怪-变脏后.png",
+      "destination": "assets/episodes/episode-EP002/characters/C06_mud-monster/dirty.png",
+      "asset_id": "C06",
+      "kind": "characters",
+      "scope": "episode-EP002",
+      "sha256": "6cf9337a5e0c16e2bc7235d7261179b98b29c3e287dcbdbbcbf6208f78a6a737",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-9-夜猫怪.png",
+      "destination": "assets/episodes/episode-EP008/characters/C07_night-cat/front.png",
+      "asset_id": "C07",
+      "kind": "characters",
+      "scope": "episode-EP008",
+      "sha256": "170306cfeaead4d2d5df829a0f07657035e9b650460c883f5348588210388346",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-10-鼻涕怪.png",
+      "destination": "assets/episodes/episode-EP010/characters/C08_snot-monster/front.png",
+      "asset_id": "C08",
+      "kind": "characters",
+      "scope": "episode-EP010",
+      "sha256": "1feb2f2c7f37bbee292c3c9782c2e09b62627b76a042ee78c9245be643a4d5b9",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-10-小黄瓜-阿瓜.png",
+      "destination": "assets/episodes/episode-EP010/characters/C09_cucumber-agua/front.png",
+      "asset_id": "C09",
+      "kind": "characters",
+      "scope": "episode-EP010",
+      "sha256": "8ef315310c9ad120c854ed9efa484a298d317e53ac5e14b8712eb1c2650ba6eb",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-10-小黄瓜-阿瓜-背面.png",
+      "destination": "assets/episodes/episode-EP010/characters/C09_cucumber-agua/back.png",
+      "asset_id": "C09",
+      "kind": "characters",
+      "scope": "episode-EP010",
+      "sha256": "465b412c4ca1d1185767a432e05fba634e4a17d324f2356fa41d7037e3c19c6c",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-18-咕噜爸爸-年轻时.png",
+      "destination": "assets/episodes/episode-EP018/characters/C10_young-gulu-dad/front.png",
+      "asset_id": "C10",
+      "kind": "characters",
+      "scope": "episode-EP018",
+      "sha256": "72b752b03bbe2bf16e193549bc053a463bb2cbdc247ba80aece8ada42632931d",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-18-咕噜爸爸-年轻时-背面.png",
+      "destination": "assets/episodes/episode-EP018/characters/C10_young-gulu-dad/back.png",
+      "asset_id": "C10",
+      "kind": "characters",
+      "scope": "episode-EP018",
+      "sha256": "e5f2f52d0aa567b8ad0b4ee230145c750241481fc94bb51a3ebb10457ac2aa1c",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-18-雾隐博士.png",
+      "destination": "assets/pending/characters/C11_mist-doctor/front.png",
+      "asset_id": "C11",
+      "kind": "characters",
+      "scope": "pending",
+      "sha256": "85fd73ebf91077205feefa3466ec201e179d19d672cfeb4f9a94d71fca855706",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-18-雾隐博士-侧面.png",
+      "destination": "assets/pending/characters/C11_mist-doctor/side.png",
+      "asset_id": "C11",
+      "kind": "characters",
+      "scope": "pending",
+      "sha256": "9e438ea8f130d8c2527ef597db1cd55a8754ff5414b7b89e21833678b59b6167",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-18-雾隐博士-背面.png",
+      "destination": "assets/pending/characters/C11_mist-doctor/back.png",
+      "asset_id": "C11",
+      "kind": "characters",
+      "scope": "pending",
+      "sha256": "f6edffbdd6800d49175cddc951e07d892bb6e5ef778fb376efe92d5034d3c7a8",
+      "status": "moved"
+    },
+    {
+      "source": "images/1-18-镜凌顾问-雾隐伪装.png",
+      "destination": "assets/pending/characters/C12_mirror-advisor/front.png",
+      "asset_id": "C12",
+      "kind": "characters",
+      "scope": "pending",
+      "sha256": "f3784391e3b6b43ff61de3b365eeabe5bade653fa39a5d90a642281672c6bdd0",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-0-蔬菜街-全景.png",
+      "destination": "assets/seasons/season-2/scenes/S04_vegetable-street/wide.png",
+      "asset_id": "S04",
+      "kind": "scenes",
+      "scope": "season-2",
+      "sha256": "63faf9603d6dbfd8de2742d5b8a422f62894b58192d98307ddf566d1b993f42d",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-1-小辣椒-生气.png",
+      "destination": "assets/seasons/season-2/characters/C13_little-chili/angry.png",
+      "asset_id": "C13",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "992d45e2be0688426e4ed51263cd3d20660fbd0c271bd7954926abe45c43b1a4",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-1-小辣椒-生气-背面.png",
+      "destination": "assets/seasons/season-2/characters/C13_little-chili/back.png",
+      "asset_id": "C13",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "9f60f5df50f7e40bcfb4fd86b98af6f00a64657f6dcccda82767ab8ece955506",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-1-小辣椒-开心.png",
+      "destination": "assets/seasons/season-2/characters/C13_little-chili/happy.png",
+      "asset_id": "C13",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "de15664b5a5e848238c3c9caaa62b9ab65a10febbc92cfa2bf7a862d7ac1888d",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-1-小番茄.png",
+      "destination": "assets/seasons/season-2/characters/C14_little-tomato/front.png",
+      "asset_id": "C14",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "1227e6452e9a9c43e102c783801ced242b04dfdf3c1c52fea35152e8c182e9c1",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-1-小番茄-背面.png",
+      "destination": "assets/seasons/season-2/characters/C14_little-tomato/back.png",
+      "asset_id": "C14",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "a4ac93a8c03db1329cbac1077c0aeda7651906b8da812aa78915bfc22ff86967",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-1-小豌豆.png",
+      "destination": "assets/seasons/season-2/characters/C15_little-pea/front.png",
+      "asset_id": "C15",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "024c427f688e58eadf9c80dcf5c613fb5469c6edcd611b06e567563f072d1a89",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-1-小豌豆-背面.png",
+      "destination": "assets/seasons/season-2/characters/C15_little-pea/back.png",
+      "asset_id": "C15",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "4e1ed70a1d2cd426c60e9645bc1b1003f9a35e793b719019565be380464a5879",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-1-洋葱妹妹.png",
+      "destination": "assets/seasons/season-2/characters/C16_onion-sister/front.png",
+      "asset_id": "C16",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "3d2f400ed18871e8f49b6769995ff2c98331f3fb4c180c54e4dcb26c3ca2e6d2",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-1-胡萝卜爷爷.png",
+      "destination": "assets/seasons/season-2/characters/C17_carrot-grandpa/front.png",
+      "asset_id": "C17",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "d4cbf2ce005da92a14058b0f013cfd592f57f0bf7a620773e096b324fba3b883",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-2-跳跳兔.png",
+      "destination": "assets/seasons/season-2/characters/C18_jump-rabbit/front.png",
+      "asset_id": "C18",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "fb8a113f0e7884fbc5caddd387bc177d0b6f98e5c0eb02155c84c2739c14a19b",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-2-跳跳兔-背面.png",
+      "destination": "assets/seasons/season-2/characters/C18_jump-rabbit/back.png",
+      "asset_id": "C18",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "68b578582a89628901433cbd769f7f19fd505f901ddd82d0a49904b3994640f7",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-3-迷迷魔种.png",
+      "destination": "assets/seasons/season-2/characters/C19_mimi-magic-seed/front.png",
+      "asset_id": "C19",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "b5c3f9c01327f8b0d92fbd804e99db194cdb665043a91678f8c3574134a767c3",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-3-迷迷魔种-侧面.png",
+      "destination": "assets/seasons/season-2/characters/C19_mimi-magic-seed/side.png",
+      "asset_id": "C19",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "1ee7b49531359c92b12f0c67133738f5b8be4433a927ab01b5704b7cd32e373a",
+      "status": "moved"
+    },
+    {
+      "source": "images/2-3-迷迷魔种-背面.png",
+      "destination": "assets/seasons/season-2/characters/C19_mimi-magic-seed/back.png",
+      "asset_id": "C19",
+      "kind": "characters",
+      "scope": "season-2",
+      "sha256": "e1bc3202a62443b19146be3d812133a93d748270bf09ae801ecc21905fdff614",
+      "status": "moved"
+    }
+  ]
+}
