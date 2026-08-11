@@ -13,6 +13,16 @@ from extract_docx_text import extract_text
 
 
 KIND_PREFIXES = {"characters": "C", "scenes": "S", "props": "P"}
+EPISODE_OVERRIDE_KEYS = {
+    "audience",
+    "format",
+    "episode_target_seconds",
+    "shot_count",
+    "content_guidelines",
+    "visual_canon_precedence",
+    "video_workflow",
+    "storyboard_skill",
+}
 
 
 def _yaml_string(value: object) -> str:
@@ -345,10 +355,17 @@ def create_episode(
     episode_title: str,
     story_brief: str,
     asset_references: list[str],
+    *,
+    episode_overrides: dict[str, Any] | None = None,
 ) -> Path:
     """Create an episode folder and its explicit Storyboard Generator handoff."""
     root = project_root.resolve()
     settings = _read_project_settings(root)
+    overrides = episode_overrides or {}
+    unknown_override_keys = set(overrides) - EPISODE_OVERRIDE_KEYS
+    if unknown_override_keys:
+        raise ValueError(f"不支持的本集覆盖项：{', '.join(sorted(unknown_override_keys))}")
+    effective_settings = {**settings, **{key: str(value) for key, value in overrides.items()}}
     index_path = root / "project-settings" / "asset-index.json"
     index = json.loads(index_path.read_text(encoding="utf-8"))
     assets_by_id = {asset["asset_id"]: asset for asset in index["assets"]}
@@ -371,6 +388,11 @@ def create_episode(
     if episode_dir.exists():
         raise FileExistsError(f"剧集目录已存在：{episode_dir}")
     episode_dir.mkdir(parents=True)
+    if overrides:
+        (episode_dir / "episode-overrides.yaml").write_text(
+            "\n".join(f"{key}: {_yaml_string(value)}" for key, value in overrides.items()) + "\n",
+            encoding="utf-8",
+        )
     (episode_dir / "story-brief.md").write_text(f"# {episode_title}\n\n{story_brief}\n", encoding="utf-8")
     (episode_dir / "episode-assets.md").write_text(
         "# 本集素材\n\n"
@@ -391,8 +413,8 @@ def create_episode(
         for asset_id in asset_ids
         for asset in [assets_by_id[asset_id]]
     )
-    configured_workflow = settings.get("video_workflow") or "未设置；由项目负责人选择图片、视频与剪辑工具"
-    configured_skill = settings.get("storyboard_skill")
+    configured_workflow = effective_settings.get("video_workflow") or "未设置；由项目负责人选择图片、视频与剪辑工具"
+    configured_skill = effective_settings.get("storyboard_skill")
     context_files = [
         "project-settings/project.yaml",
         "project-settings/character-bible.md",
@@ -404,15 +426,22 @@ def create_episode(
         context_files.append("project-settings/fixed-settings-source.txt")
     context_list = "、".join(f"`{path}`" for path in context_files)
     package = episode_dir / "storyboard-package.md"
-    package.write_text(
+    override_section = ""
+    if overrides:
+        override_section = "## 本集覆盖参数\n\n" + "\n".join(
+            f"- {key}：{value}" for key, value in overrides.items()
+        ) + "\n\n"
+    package_contents = (
         f"# {episode_id}《{episode_title}》分镜交接包\n\n"
         "## 项目制作参数\n\n"
-        f"- 受众：{settings.get('audience') or '未设置，请先确认'}\n"
-        f"- 画幅：{settings.get('format') or '未设置，请先确认'}\n"
-        f"- 目标时长：{settings.get('episode_target_seconds') or '未设置，请先确认'} 秒\n"
-        f"- 镜头数量{settings.get('shot_count') or '由剧情节奏、动作、对白和情绪变化决定'}。\n"
-        f"- 内容限制：{settings.get('content_guidelines') or '未设置，请先确认'}。\n"
+        f"- 受众：{effective_settings.get('audience') or '未设置，请先确认'}\n"
+        f"- 画幅：{effective_settings.get('format') or '未设置，请先确认'}\n"
+        f"- 目标时长：{effective_settings.get('episode_target_seconds') or '未设置，请先确认'} 秒\n"
+        f"- 镜头数量{effective_settings.get('shot_count') or '由剧情节奏、动作、对白和情绪变化决定'}。\n"
+        f"- 内容限制：{effective_settings.get('content_guidelines') or '未设置，请先确认'}。\n"
         f"- 制作流程：{configured_workflow}。\n\n"
+        + override_section
+        +
         "## 交接优先级\n\n"
         "本交接包与引用的项目配置是本集创作的最高优先级；它们覆盖分镜 Skill 的任何默认受众、画幅、时长、镜头数和内容尺度。\n\n"
         "## 剧情需求\n\n"
@@ -425,7 +454,10 @@ def create_episode(
         f"{chr(10).join(f'- {name}（默认本集专属）' for name in new_asset_drafts) or '- 无'}\n\n"
         "## 交给 Storyboard Generator 的任务\n\n"
         + (f"使用 `${configured_skill}`" if configured_skill else "使用项目指定的分镜 Skill")
-        + f" 阅读本文件与 {context_list}，先输出故事梗概、人物小传和本集大纲，等待确认后再写正式剧本并拆分镜头表。必须遵守上方交接优先级，不得套用冲突的默认规则。\n",
+        + f" 阅读本文件与 {context_list}，先输出故事梗概、人物小传和本集大纲，等待确认后再写正式剧本并拆分镜头表。必须遵守上方交接优先级，不得套用冲突的默认规则。\n"
+    )
+    package.write_text(
+        package_contents,
         encoding="utf-8",
     )
     return package

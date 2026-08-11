@@ -2,7 +2,7 @@
 
 每个 `storyboard-package.md` 必须包含：
 
-1. 项目参数：从 `project-settings/project.yaml` 读取受众、画幅、目标时长、内容限制和镜头节奏。
+1. 项目参数：从 `project-settings/project.yaml` 读取受众、画幅、目标时长、内容限制和镜头节奏；如存在 `episodes/<集>/episode-overrides.yaml`，本集覆盖参数优先，且不得改写项目默认值。
 2. 镜头约束：镜头数和时长服务于剧情、动作、对白和情绪，避免无意义碎镜头。
 3. 本集剧情需求、不可改动设定和本集状态。
 4. 素材表：ID、名称、类别、范围、图片路径；只允许表中资产作为既有设定。

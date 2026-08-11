@@ -197,6 +197,27 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertIn("目标时长：60 秒", contents)
             self.assertIn("悬疑克制、无血腥画面", contents)
 
+    def test_episode_duration_override_changes_only_that_episode_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None, episode_target_seconds=120)
+            write_asset_index(
+                root,
+                [{"asset_id": "C01", "name": "主角", "kind": "characters", "scope": "global", "destination": "assets/global/characters/C01_lead/front.png"}],
+            )
+            package = create_episode(
+                root,
+                "EP001",
+                "特别篇",
+                "一段更完整的故事。",
+                ["主角"],
+                episode_overrides={"episode_target_seconds": 180},
+            )
+
+            self.assertIn("目标时长：180 秒", package.read_text(encoding="utf-8"))
+            self.assertIn('episode_target_seconds: "120"', (root / "project-settings/project.yaml").read_text(encoding="utf-8"))
+            self.assertIn('episode_target_seconds: "180"', (package.parent / "episode-overrides.yaml").read_text(encoding="utf-8"))
+
     def test_episode_creation_resolves_asset_names_without_requiring_internal_ids(self) -> None:
         assets = [
             {"asset_id": "C01", "name": "咕噜", "aliases": ["小怪兽"], "kind": "characters", "scope": "global", "destination": "assets/global/characters/C01_gulu/front.png"},
