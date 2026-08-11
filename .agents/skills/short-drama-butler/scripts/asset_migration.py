@@ -33,7 +33,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _destination(specification: dict[str, str]) -> Path:
+def _destination(specification: dict[str, str], extension: str) -> Path:
     kind = specification["kind"]
     if kind not in KINDS:
         raise AssetMigrationError(f"未知素材类别：{kind}")
@@ -41,7 +41,7 @@ def _destination(specification: dict[str, str]) -> Path:
         if not specification.get(field):
             raise AssetMigrationError(f"缺少素材字段：{field}")
 
-    filename = f"{specification['asset_id']}_{specification['slug']}/{specification['variant']}.png"
+    filename = f"{specification['asset_id']}_{specification['slug']}/{specification['variant']}{extension}"
     scope = specification["scope"]
     if scope == "global":
         return Path("assets/global") / kind / filename
@@ -66,7 +66,7 @@ def build_plan(project_root: Path, specifications: list[dict[str, str]]) -> dict
         source = root / source_rel
         if not source.is_file():
             raise AssetMigrationError(f"找不到源素材：{source_rel}")
-        destination_rel = _destination(specification)
+        destination_rel = _destination(specification, source.suffix.lower() or ".bin")
         destination = root / destination_rel
         if source_rel in seen_sources:
             raise AssetMigrationError(f"重复源素材：{source_rel}")
@@ -76,8 +76,7 @@ def build_plan(project_root: Path, specifications: list[dict[str, str]]) -> dict
             raise AssetMigrationError(f"目标已存在：{destination_rel}")
         seen_sources.add(source_rel)
         seen_destinations.add(destination_rel)
-        records.append(
-            {
+        record: dict[str, Any] = {
                 "source": source_rel.as_posix(),
                 "destination": destination_rel.as_posix(),
                 "asset_id": specification["asset_id"],
@@ -85,8 +84,11 @@ def build_plan(project_root: Path, specifications: list[dict[str, str]]) -> dict
                 "scope": specification["scope"],
                 "sha256": _sha256(source),
                 "status": "planned",
-            }
-        )
+        }
+        for field in ("name", "aliases", "slug", "variant"):
+            if field in specification:
+                record[field] = specification[field]
+        records.append(record)
 
     return {
         "version": 1,

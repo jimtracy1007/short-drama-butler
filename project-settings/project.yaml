@@ -1,9 +1,0 @@
-project_name: "奇妙岛怪事"
-audience: "3-8 岁"
-format: "16:9"
-episode_target_seconds: 120
-shot_count: "由剧情节奏、动作、对白和情绪变化决定"
-visual_canon_precedence: "confirmed_images"
-video_workflow: "关键帧图片 → 豆包图生视频 → 剪辑"
-storyboard_skill: "seedance-storyboard-generator"
-source_document: "source-material/固定设定.docx"
