@@ -7,6 +7,16 @@ description: Use when initializing, organizing, migrating, or maintaining an AI 
 
 管理可复用 AI 短剧项目。先把设定与素材变成可追溯资产库，再将单集创作包交给 `seedance-storyboard-generator`；不调用视频 API。
 
+## 启动依赖检查
+
+首次执行本 Skill 时，先运行：
+
+```bash
+python3 scripts/storyboard_dependency.py --install
+```
+
+它会检测同级 `seedance-storyboard-generator`；已安装则直接复用，缺失时才从 `liangdabiao/Seedance2-Storyboard-Generator` 下载该 Skill 子目录。安装成功后继续工作；下载或校验失败时，报告错误并停止分镜交接，不要假装依赖已可用。
+
 ## 操作路由
 
 | 用户目标 | 执行内容 |

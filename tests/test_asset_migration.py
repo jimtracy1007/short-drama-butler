@@ -28,6 +28,11 @@ from project_files import (  # noqa: E402
     write_asset_index,
 )
 from extract_docx_text import extract_text  # noqa: E402
+from storyboard_dependency import (  # noqa: E402
+    DependencyError,
+    extract_skill_from_archive,
+    find_installed_skill,
+)
 
 
 class AssetMigrationTests(unittest.TestCase):
@@ -253,6 +258,29 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertIn("成人：悬疑爱好者", package)
             self.assertIn("关键帧图 → 任意图生视频工具 → 人工剪辑", package)
             self.assertIn("$custom-storyboard", package)
+
+    def test_storyboard_dependency_detector_installs_exact_skill_directory_without_overwriting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "skills"
+            archive_path = Path(temp_dir) / "upstream.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr(
+                    "Seedance2-Storyboard-Generator-main/.claude/skills/seedance-storyboard-generator/SKILL.md",
+                    "---\nname: seedance-storyboard-generator\ndescription: test\n---\n",
+                )
+                archive.writestr(
+                    "Seedance2-Storyboard-Generator-main/.claude/skills/seedance-storyboard-generator/references/manual.md",
+                    "reference",
+                )
+
+            self.assertIsNone(find_installed_skill([root]))
+            with zipfile.ZipFile(archive_path) as archive:
+                installed = extract_skill_from_archive(archive, root)
+            self.assertEqual(installed, root / "seedance-storyboard-generator")
+            self.assertEqual(find_installed_skill([root]), installed)
+            with zipfile.ZipFile(archive_path) as archive:
+                with self.assertRaisesRegex(DependencyError, "已存在"):
+                    extract_skill_from_archive(archive, root)
 
     def test_initialize_and_register_project_asset_persist_full_configuration_by_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

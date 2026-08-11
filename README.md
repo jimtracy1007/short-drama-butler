@@ -18,7 +18,13 @@ $seedance-storyboard-generator
 
 短剧管家不调用 Seedance、豆包或其他视频 API，也不自动剪辑。你可以使用任意图片和视频工具。
 
-若配合 `seedance-storyboard-generator`，请单独安装该 Skill，并让它遵守本项目的[交接优先协议](.agents/skills/short-drama-butler/references/seedance-integration-protocol.md)：交接包的项目参数高于分镜 Skill 的默认值。这样即使对方 Skill 默认使用短时长或竖屏，也不会覆盖你的项目配置。
+短剧管家在首次使用时会自动检测同级的 `seedance-storyboard-generator`：已安装则直接复用，缺失时仅下载上游仓库里的该 Skill 子目录，不覆盖已有安装。它会使用 [liangdabiao/Seedance2-Storyboard-Generator](https://github.com/liangdabiao/Seedance2-Storyboard-Generator) 作为来源，并让它遵守本项目的[交接优先协议](.agents/skills/short-drama-butler/references/seedance-integration-protocol.md)：交接包的项目参数高于分镜 Skill 的默认值。这样即使对方 Skill 默认使用短时长或竖屏，也不会覆盖你的项目配置。
+
+Codex Skill 本身没有“安装完成后自动执行脚本”的生命周期钩子，因此可靠的自动动作发生在你第一次调用 `$short-drama-butler` 时，而不是下载文件夹的瞬间。需要手动触发时，运行：
+
+```bash
+python3 .agents/skills/short-drama-butler/scripts/storyboard_dependency.py --install
+```
 
 ## 你只需要说名称，不需要记编号
 
