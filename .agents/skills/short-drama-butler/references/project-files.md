@@ -1,19 +1,65 @@
-# 项目文件约定
+# 项目文件参考
+
+短剧管家自动读写这些文件。用户使用角色、场景和道具的名称即可，不需要修改内部编号。
+
+## 目录地图
 
 ```text
-project-settings/  项目配置、角色圣经、素材索引、冲突、迁移账本
-source-material/   原始固定设定文档
-assets/global/     可跨剧集复用的角色、场景、道具
-assets/seasons/    某一季可复用素材
-assets/episodes/   本集专属素材
-assets/pending/    缺少文字设定或等待确认的素材
-episodes/          剧情需求、剧本、分镜和交接包
+project-settings/                 项目长期记忆
+source-material/                  导入前的原始资料
+assets/                           已确认、可在画面中使用的图片
+episodes/EP001_剧集名/            单集工作资料
+templates/                        新建资料时使用的模板
 ```
 
-| 字段 | 规则 |
-| --- | --- |
-| ID | 角色 `Cxx`、场景 `Sxx`、道具 `Pxx`；不得复用。它们是内部索引，用户用角色/场景/道具名称或别名即可。 |
-| 角色圣经 | 每位角色分别记录不可改动设定、可补充设定、本集状态。 |
-| 素材范围 | 新素材默认 `episode-<ID>`；只有用户确认才改为 `global` 或 `season-<N>`。 |
-| 迁移账本 | 记录原路径、目标路径、SHA-256、时间和状态；它是唯一回滚依据。 |
-| 本集资产生产单 | `episodes/<集>/asset-production-plan.md` 只在大纲确认后创建；图片确认、登记后才会进入本集素材清单。 |
+## 项目长期记忆
+
+| 文件 | 谁用 | 作用 | 何时更新 |
+| --- | --- | --- | --- |
+| `project-settings/project.yaml` | 短剧管家、分镜 Skill | 受众、画幅、时长、内容尺度、镜头节奏、制作流程和分镜 Skill。 | 初始化或用户改变项目规则时。 |
+| `project-settings/character-bible.md` | 创作与出图阶段 | 每个角色不可变特征、可补充特征、当前状态。 | 确认人物设定或角色发生持续变化时。 |
+| `project-settings/asset-index.json` | Agent 和工具 | 已确认资产的内部 ID、名称、别名、范围、图片路径和视图。 | 图片确认并登记，或资产升降级时。 |
+| `project-settings/setting-conflicts.md` | 创作与出图阶段 | 文字设定与已确认图片矛盾时的裁决；图片优先。 | 每次确认冲突处理时。 |
+| `project-settings/source-document.json` | 导入审计 | 原始 Word 的来源、哈希和迁移时间。 | 导入旧 Word 时自动创建。 |
+| `project-settings/fixed-settings-source.txt` | 分镜 Skill | 从旧 Word 提取出的可读取文本。 | 导入旧 Word 时自动创建。 |
+| `project-settings/migration-ledger.json` | 维护者 | 素材迁移前后路径、哈希和状态；用于回滚。 | 执行素材迁移时。 |
+
+## 素材库
+
+| 位置 | 里面放什么 | 什么时候使用 |
+| --- | --- | --- |
+| `assets/global/` | 会在不同剧集或不同季持续出现的角色、场景、道具。 | 用户明确确认“以后会复用”。 |
+| `assets/seasons/` | 只在某一季复用的素材。 | 用户确认只在本季复用。 |
+| `assets/episodes/` | 只属于一集的已确认图片。 | 新资产确认图片后的默认位置。 |
+| `assets/pending/` | 还没有确认、或缺少文字设定的素材。 | 等用户确认后再归类。 |
+| `source-material/` | 原始 Word、旧剧本、导入前资料。 | 用于追溯，不直接当作锁定视觉素材。 |
+
+## 每集文件
+
+每集目录是 `episodes/EP001_剧集名/`。先有需求，后有大纲与资产，最后才进入剧本和分镜。
+
+| 文件 | 创建时机 | 它回答的问题 | 是否可直接交给分镜 Skill |
+| --- | --- | --- | --- |
+| `story-brief.md` | 创建这一集时 | “这一集要讲什么？” | 参考；不是完整交接包。 |
+| `episode-assets.md` | 创建这一集时 | “现在有哪些已确认资产？还缺哪些？” | 参考；新增草案不能当锁定资产。 |
+| `asset-production-plan.md` | 大纲确认后且有新增资产时 | “新增角色、场景、道具的图什么时候、按什么标准制作？” | 用于图片生产；不是分镜输入。 |
+| `asset-production-manifest.json` | 创建资产生产单时 | “每项计划资产的状态和预留图片路径是什么？” | 供 Agent / 工具更新；用户通常不用打开。 |
+| `storyboard-package.md` | 创建这一集时，及资产确认后更新 | “分镜 Skill 必须遵守什么？” | 是。它是本集唯一正式交接包。 |
+
+## 资产从想法到可用图片
+
+```text
+新名称出现在大纲
+        ↓
+episode-assets.md：本集新增草案
+        ↓
+asset-production-plan.md：确认生产任务
+        ↓
+图片生成并由用户确认
+        ↓
+asset-index.json：登记为已确认资产
+        ↓
+storyboard-package.md：作为锁定素材交给分镜
+```
+
+新资产默认范围为 `episode-<ID>`。用户确认可复用后，才移动到 `global` 或 `season-<N>`；其名称和别名始终是用户面对的操作方式，`Cxx`、`Sxx`、`Pxx` 只供系统内部索引。

@@ -283,6 +283,33 @@ class AssetMigrationTests(unittest.TestCase):
                 with self.assertRaisesRegex(DependencyError, "已存在"):
                     extract_skill_from_archive(archive, root)
 
+    def test_readme_and_project_file_reference_explain_all_beginner_creation_modes(self) -> None:
+        repository_root = Path(__file__).parents[1]
+        readme = (repository_root / "README.md").read_text(encoding="utf-8")
+        project_files = (
+            repository_root / ".agents/skills/short-drama-butler/references/project-files.md"
+        ).read_text(encoding="utf-8")
+
+        for heading in (
+            "## 先选一种使用方式",
+            "从零开始做一个新系列",
+            "已有项目、旧文档或图片",
+            "今天只做一集独立短剧",
+            "继续做连续剧的下一集",
+            "大纲里出现新角色或新场景",
+            "## 每个文件是做什么的",
+        ):
+            self.assertIn(heading, readme)
+        self.assertNotIn("读取当前项目配置，创建剧情需求、本集状态、素材清单和 Storyboard 交接包", readme)
+        for filename in (
+            "story-brief.md",
+            "episode-assets.md",
+            "asset-production-plan.md",
+            "asset-production-manifest.json",
+            "storyboard-package.md",
+        ):
+            self.assertIn(filename, project_files)
+
     def test_asset_production_plan_is_created_after_outline_for_episode_only_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
