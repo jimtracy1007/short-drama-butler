@@ -28,6 +28,7 @@ from project_files import (  # noqa: E402
     register_project_asset,
     record_episode_continuity,
     provide_episode_asset_image,
+    provide_episode_asset_images,
     resolve_asset_references,
     write_asset_index,
 )
@@ -445,6 +446,31 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertEqual(manifest["assets"][0]["scope"], "episode-EP001")
             self.assertEqual(manifest["assets"][1]["status"], "planned")
 
+    def test_adding_to_an_asset_production_plan_preserves_existing_asset_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None)
+            create_episode(root, "EP001", "海滩", "小螃蟹回海。", ["小螃蟹", "海滩"])
+            create_asset_production_plan(
+                root,
+                "EP001",
+                [{"name": "小螃蟹", "kind": "characters", "visual_brief": "圆润小螃蟹"}],
+            )
+            image = self.write_file(root, "assets/pending/crab.png", b"crab")
+            provide_episode_asset_image(root, "EP001", "小螃蟹", image)
+            confirm_episode_asset(root, "EP001", "小螃蟹")
+
+            create_asset_production_plan(
+                root,
+                "EP001",
+                [{"name": "泡泡湾海滩", "kind": "scenes", "visual_brief": "浅海与湿沙的海滩"}],
+            )
+            manifest = json.loads((root / "episodes/EP001_海滩/asset-production-manifest.json").read_text(encoding="utf-8"))
+            by_name = {asset["name"]: asset for asset in manifest["assets"]}
+
+            self.assertEqual(by_name["小螃蟹"]["status"], "registered")
+            self.assertEqual(by_name["泡泡湾海滩"]["status"], "planned")
+
     def test_confirming_an_episode_asset_updates_manifest_assets_and_storyboard_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -472,6 +498,30 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertIn(asset["asset_id"], package_contents)
             self.assertNotIn("神秘访客（默认本集专属）", package_contents)
             self.assertIn("神秘访客", episode_assets)
+
+    def test_confirming_a_character_three_view_set_archives_all_views_under_one_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None)
+            create_episode(root, "EP001", "新朋友", "许岚遇见小螃蟹。", ["小螃蟹"])
+            create_asset_production_plan(
+                root,
+                "EP001",
+                [{"name": "小螃蟹", "kind": "characters", "visual_brief": "圆润的小螃蟹"}],
+            )
+            images = {
+                "front": self.write_file(root, "assets/pending/crab-front.png", b"front"),
+                "side": self.write_file(root, "assets/pending/crab-side.png", b"side"),
+                "back": self.write_file(root, "assets/pending/crab-back.png", b"back"),
+            }
+
+            provide_episode_asset_images(root, "EP001", "小螃蟹", images)
+            asset = confirm_episode_asset(root, "EP001", "小螃蟹")
+
+            self.assertEqual(asset["destination"], asset["views"][0]["path"])
+            self.assertEqual([view["variant"] for view in asset["views"]], ["front", "side", "back"])
+            self.assertEqual([(root / view["path"]).read_bytes() for view in asset["views"]], [b"front", b"side", b"back"])
+            self.assertTrue(all(not image.exists() for image in images.values()))
 
     def test_initialize_and_register_project_asset_persist_full_configuration_by_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

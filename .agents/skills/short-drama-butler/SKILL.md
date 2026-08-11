@@ -58,7 +58,7 @@ description: Use when initializing, organizing, migrating, or maintaining an AI 
 
 1. 识别新增资产的名称、类别和视觉说明，调用 `create_asset_production_plan` 生成本集生产单。
 2. 展示生产单，待用户确认后再使用用户指定的图片工具生成参考图；也可接收用户提供的图片。
-3. 图片先放入项目目录后，用 `provide_episode_asset_image` 登记图片路径；用户确认后必须使用 `confirm_episode_asset`。它会以迁移账本安全归档图片，再登记资产、更新生产状态、本集素材清单和交接包。默认范围为 `episode-<ID>`；只有明确确认才提升为季度或全局资产。
+3. 图片先放入项目目录后，用 `provide_episode_asset_images` 登记图片路径；角色默认登记 `front`、`side`、`back` 三视图，重要场景默认登记 `front`、`reverse`、`side` 三个机位。单张图片仍可用兼容接口 `provide_episode_asset_image`。用户确认后必须使用 `confirm_episode_asset`。它会以迁移账本安全归档整组图片，再登记为一个名称资产、更新生产状态、本集素材清单和交接包。默认范围为 `episode-<ID>`；只有明确确认才提升为季度或全局资产。
 4. 确认资产已进入更新后的交接包后，再写正式剧本、镜头表和关键帧提示词。
 
 未确认的生产单只能作为待生成草案，不能被分镜当作已锁定视觉素材。

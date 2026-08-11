@@ -335,12 +335,13 @@ def record_episode_continuity(
 
 def _production_prompt(kind: str, visual_brief: str, frame_format: str) -> str:
     shared = "遵守项目角色圣经、已确认素材与视觉冲突裁决；不添加文字、Logo 或水印。"
+    brief = visual_brief.rstrip("。.!！?？ ")
     if kind == "characters":
-        return f"角色参考图：{visual_brief}。生成清晰正面全身主参考图，保留服装、发型、配色和显著特征。{shared}"
+        return f"角色三视图参考：{brief}。分别生成清晰的正面、左侧、背面全身图，保持体型、配色、显著特征与材质一致。{shared}"
     if kind == "scenes":
-        return f"场景参考图：{visual_brief}。以 {frame_format or '项目指定画幅'} 输出无人物的主背景图，明确空间结构、主要入口和光源方向。{shared}"
+        return f"场景三视图参考：{brief}。以 {frame_format or '项目指定画幅'} 分别输出无人物的正打、反打、侧面全景背景图，保持空间结构、主要入口和光源方向一致。{shared}"
     if kind == "props":
-        return f"道具参考图：{visual_brief}。生成干净、可辨识的独立参考图，明确材质、尺度和可被角色操作的部位。{shared}"
+        return f"道具参考图：{brief}。生成干净、可辨识的独立参考图，明确材质、尺度和可被角色操作的部位。{shared}"
     raise ValueError(f"未知素材类别：{kind}")
 
 
@@ -356,8 +357,15 @@ def create_asset_production_plan(
     if not asset_requests:
         raise ValueError("资产生产单至少需要一项新增资产")
 
-    names: set[str] = set()
-    assets: list[dict[str, str]] = []
+    manifest_path = episode_dir / "asset-production-manifest.json"
+    existing_assets: list[dict[str, Any]] = []
+    if manifest_path.is_file():
+        existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if existing_manifest.get("episode_id") not in {None, episode_id}:
+            raise ValueError("资产生产单与当前剧集不匹配")
+        existing_assets = existing_manifest.get("assets", [])
+    names = {str(asset.get("name", "")).strip() for asset in existing_assets}
+    assets: list[dict[str, Any]] = list(existing_assets)
     for request in asset_requests:
         name = request.get("name", "").strip()
         kind = request.get("kind", "").strip()
@@ -365,7 +373,7 @@ def create_asset_production_plan(
         if not name or not visual_brief:
             raise ValueError("每项资产都需要名称和视觉说明")
         if name in names:
-            raise ValueError(f"资产生产单存在重复名称：{name}")
+            raise ValueError(f"资产生产单已存在同名素材：{name}")
         if kind not in KIND_PREFIXES:
             raise ValueError(f"未知素材类别：{kind}")
         names.add(name)
@@ -382,7 +390,6 @@ def create_asset_production_plan(
             }
         )
 
-    manifest_path = episode_dir / "asset-production-manifest.json"
     manifest_path.write_text(
         json.dumps({"episode_id": episode_id, "assets": assets}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -394,7 +401,7 @@ def create_asset_production_plan(
         "",
         f"- 项目画幅：{settings.get('format') or '未设置，请先确认'}",
         f"- 默认范围：episode-{episode_id}（除非用户明确确认可复用）",
-        "- 当前状态：待生成；尚未成为已锁定资产。",
+        "- 新增素材默认状态：待生成；只有确认并登记后才成为已锁定资产。",
         "",
     ]
     for position, asset in enumerate(assets, start=1):
@@ -405,6 +412,7 @@ def create_asset_production_plan(
                 f"- 范围：{asset['scope']}",
                 f"- 视觉说明：{asset['visual_brief']}",
                 f"- 出图提示词：{asset['prompt']}",
+                f"- 当前状态：{asset.get('status', 'planned')}",
                 "- 生成后：保存图片路径 → 用户确认 → 按名称登记资产 → 刷新 `storyboard-package.md`。",
                 "",
             ]
@@ -532,17 +540,30 @@ def _asset_slug(name: str) -> str:
     return slug or "asset"
 
 
-def provide_episode_asset_image(project_root: Path, episode_id: str, name: str, image_path: Path) -> Path:
-    """Record a project-local image as supplied, but do not yet make it usable."""
+def provide_episode_asset_images(
+    project_root: Path,
+    episode_id: str,
+    name: str,
+    image_paths: dict[str, Path],
+) -> Path:
+    """Record one or more project-local asset views, without yet making them usable."""
     root = project_root.resolve()
     episode_dir = _episode_directory(root, episode_id)
-    image = image_path.resolve()
-    if not image.is_file():
-        raise FileNotFoundError(f"找不到图片：{image_path}")
-    try:
-        relative_image = image.relative_to(root).as_posix()
-    except ValueError as error:
-        raise ValueError("图片必须先放入项目目录，再登记为本集资产") from error
+    if not image_paths:
+        raise ValueError("至少需要一张素材图片")
+    relative_images: dict[str, str] = {}
+    for variant, image_path in image_paths.items():
+        if not re.fullmatch(r"[a-z0-9-]+", variant):
+            raise ValueError(f"素材视图名称不合法：{variant}")
+        image = image_path.resolve()
+        if not image.is_file():
+            raise FileNotFoundError(f"找不到图片：{image_path}")
+        try:
+            relative_images[variant] = image.relative_to(root).as_posix()
+        except ValueError as error:
+            raise ValueError("图片必须先放入项目目录，再登记为本集资产") from error
+    if len(set(relative_images.values())) != len(relative_images):
+        raise ValueError("同一张图片不能重复登记为多个视图")
     manifest_path = episode_dir / "asset-production-manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError("本集尚未创建资产生产单")
@@ -551,10 +572,18 @@ def provide_episode_asset_image(project_root: Path, episode_id: str, name: str, 
     if asset.get("status") not in {"planned", "image_provided"}:
         raise ValueError(f"素材当前不能接收图片：{name}（{asset.get('status')}）")
     asset["status"] = "image_provided"
-    asset["image_path"] = relative_image
-    asset.setdefault("history", []).append({"status": "image_provided", "at": datetime.now(timezone.utc).isoformat()})
+    asset["image_paths"] = relative_images
+    asset["image_path"] = relative_images.get("front") or next(iter(relative_images.values()))
+    asset.setdefault("history", []).append(
+        {"status": "image_provided", "variants": list(relative_images), "at": datetime.now(timezone.utc).isoformat()}
+    )
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return manifest_path
+
+
+def provide_episode_asset_image(project_root: Path, episode_id: str, name: str, image_path: Path) -> Path:
+    """Backward-compatible single-image registration for non-view-specific assets."""
+    return provide_episode_asset_images(project_root, episode_id, name, {"reference": image_path})
 
 
 def confirm_episode_asset(
@@ -575,8 +604,11 @@ def confirm_episode_asset(
     planned_asset = _find_manifest_asset(manifest, name)
     if planned_asset.get("status") != "image_provided":
         raise ValueError("请先登记图片路径，再由用户确认素材")
-    image_path = str(planned_asset.get("image_path", "")).strip()
-    if not image_path or not (root / image_path).is_file():
+    image_paths = dict(planned_asset.get("image_paths", {}))
+    if not image_paths:
+        legacy_image_path = str(planned_asset.get("image_path", "")).strip()
+        image_paths = {"reference": legacy_image_path} if legacy_image_path else {}
+    if not image_paths or any(not image_path or not (root / image_path).is_file() for image_path in image_paths.values()):
         raise FileNotFoundError("已登记的素材图片不存在")
     final_scope = scope or str(planned_asset.get("scope", "")).strip()
     if not final_scope:
@@ -601,13 +633,18 @@ def confirm_episode_asset(
                 "kind": registered["kind"],
                 "scope": final_scope,
                 "slug": _asset_slug(name),
-                "variant": "reference",
+                "variant": variant,
             }
+            for variant, image_path in image_paths.items()
         ],
     )
-    destination = plan["records"][0]["destination"]
-    registered["destination"] = destination
-    registered["views"] = [{"variant": "reference", "path": destination}]
+    destinations = {record["variant"]: record["destination"] for record in plan["records"]}
+    preferred_variant = "front" if "front" in destinations else next(iter(destinations))
+    registered["destination"] = destinations[preferred_variant]
+    registered["views"] = [
+        {"variant": record["variant"], "path": record["destination"]}
+        for record in plan["records"]
+    ]
     ledger_path = execute_plan(root, plan)
     try:
         write_asset_index(root, assets)
@@ -616,7 +653,8 @@ def confirm_episode_asset(
         raise
     planned_asset["status"] = "user_confirmed"
     planned_asset.setdefault("history", []).append({"status": "user_confirmed", "at": datetime.now(timezone.utc).isoformat()})
-    planned_asset["image_path"] = destination
+    planned_asset["image_paths"] = destinations
+    planned_asset["image_path"] = destinations[preferred_variant]
     planned_asset["status"] = "registered"
     planned_asset["asset_id"] = registered["asset_id"]
     planned_asset["scope"] = final_scope
