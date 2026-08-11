@@ -24,6 +24,7 @@ python3 scripts/storyboard_dependency.py --install
 | 初始化或导入旧资料 | 读取固定设定，建立项目文件、资产预检和冲突清单。 |
 | 整理/新增素材 | 以名称、别名、类别、范围和图片路径登记素材；内部自动维护 `Cxx`、`Sxx`、`Pxx`，默认新素材仅限本集。 |
 | 创建一集 | 创建剧情需求、本集状态、素材清单与交接包。 |
+| 生产本集资产 | 在大纲确认后，生成 `asset-production-plan.md` 和出图提示词；确认图片后再登记资产。 |
 | 交给分镜 | 生成/更新 `storyboard-package.md`，随后调用 `$seedance-storyboard-generator`。 |
 | 审核/提升素材 | 确认剧集素材可跨集复用后，迁入全局库并更新索引。 |
 
@@ -43,6 +44,17 @@ python3 scripts/storyboard_dependency.py --install
 - 用户只需说“许岚”“管理员”“录音笔”等名称。内部 `Cxx`、`Sxx`、`Pxx` 仅用于索引和交接；按名称与别名解析，名称不唯一时列出候选项让用户选择。
 - 明确列出本集可用资产 ID、图片路径、不可改动设定和本集状态；新增角色/场景/道具默认本集专属。
 - 交给项目配置指定的分镜 Skill（可设为 `$seedance-storyboard-generator`）时，要求其先给梗概、人物小传和分集大纲，获确认后再写剧本和分镜；交接包项目配置优先于对方的默认规则。
+
+## 本集新增资产生产关口
+
+只要大纲中出现未登记的新角色、重要场景或道具，必须在“确认大纲”与“正式剧本 / 分镜”之间执行：
+
+1. 识别新增资产的名称、类别和视觉说明，调用 `create_asset_production_plan` 生成本集生产单。
+2. 展示生产单，待用户确认后再使用用户指定的图片工具生成参考图；也可接收用户提供的图片。
+3. 用户确认图片后，用 `register_project_asset` 按名称、别名、范围和图片路径登记。默认范围为 `episode-<ID>`；只有明确确认才提升为季度或全局资产。
+4. 将确认资产补入本集素材清单和交接包，随后再写正式剧本、镜头表和关键帧提示词。
+
+未确认的生产单只能作为待生成草案，不能被分镜当作已锁定视觉素材。
 
 交接包模板和必含字段见 [references/storyboard-handoff.md](references/storyboard-handoff.md)。
 与 Seedance Storyboard Generator 或其他分镜 Skill 的覆盖规则见 [references/seedance-integration-protocol.md](references/seedance-integration-protocol.md)。

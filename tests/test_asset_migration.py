@@ -20,6 +20,7 @@ from asset_migration import (  # noqa: E402
 )
 from project_files import (  # noqa: E402
     build_asset_index,
+    create_asset_production_plan,
     create_episode,
     initialize_project,
     register_asset,
@@ -281,6 +282,30 @@ class AssetMigrationTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path) as archive:
                 with self.assertRaisesRegex(DependencyError, "已存在"):
                     extract_skill_from_archive(archive, root)
+
+    def test_asset_production_plan_is_created_after_outline_for_episode_only_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None, frame_format="16:9 横屏")
+            create_episode(root, "EP001", "雨夜来信", "许岚在旧书店收到录音。", ["神秘访客", "旧书店"])
+
+            plan_path = create_asset_production_plan(
+                root,
+                "EP001",
+                [
+                    {"name": "神秘访客", "kind": "characters", "visual_brief": "成年访客，深色风衣，神情克制"},
+                    {"name": "旧书店", "kind": "scenes", "visual_brief": "雨夜街角的旧书店，暖黄橱窗"},
+                ],
+            )
+            plan = plan_path.read_text(encoding="utf-8")
+            manifest = json.loads((plan_path.parent / "asset-production-manifest.json").read_text(encoding="utf-8"))
+
+            self.assertIn("大纲确认后、正式剧本与分镜前", plan)
+            self.assertIn("16:9 横屏", plan)
+            self.assertIn("神秘访客", plan)
+            self.assertIn("旧书店", plan)
+            self.assertEqual(manifest["assets"][0]["scope"], "episode-EP001")
+            self.assertEqual(manifest["assets"][1]["status"], "planned")
 
     def test_initialize_and_register_project_asset_persist_full_configuration_by_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

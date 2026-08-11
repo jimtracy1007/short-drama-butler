@@ -229,6 +229,94 @@ def register_project_asset(
     return asset
 
 
+def _episode_directory(project_root: Path, episode_id: str) -> Path:
+    candidates = list((project_root / "episodes").glob(f"{episode_id}_*"))
+    if len(candidates) != 1:
+        raise ValueError(f"找不到唯一的剧集目录：{episode_id}")
+    return candidates[0]
+
+
+def _production_prompt(kind: str, visual_brief: str, frame_format: str) -> str:
+    shared = "遵守项目角色圣经、已确认素材与视觉冲突裁决；不添加文字、Logo 或水印。"
+    if kind == "characters":
+        return f"角色参考图：{visual_brief}。生成清晰正面全身主参考图，保留服装、发型、配色和显著特征。{shared}"
+    if kind == "scenes":
+        return f"场景参考图：{visual_brief}。以 {frame_format or '项目指定画幅'} 输出无人物的主背景图，明确空间结构、主要入口和光源方向。{shared}"
+    if kind == "props":
+        return f"道具参考图：{visual_brief}。生成干净、可辨识的独立参考图，明确材质、尺度和可被角色操作的部位。{shared}"
+    raise ValueError(f"未知素材类别：{kind}")
+
+
+def create_asset_production_plan(
+    project_root: Path,
+    episode_id: str,
+    asset_requests: list[dict[str, str]],
+) -> Path:
+    """Create a post-outline visual production brief for this episode's new assets."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    settings = _read_project_settings(root)
+    if not asset_requests:
+        raise ValueError("资产生产单至少需要一项新增资产")
+
+    names: set[str] = set()
+    assets: list[dict[str, str]] = []
+    for request in asset_requests:
+        name = request.get("name", "").strip()
+        kind = request.get("kind", "").strip()
+        visual_brief = request.get("visual_brief", "").strip()
+        if not name or not visual_brief:
+            raise ValueError("每项资产都需要名称和视觉说明")
+        if name in names:
+            raise ValueError(f"资产生产单存在重复名称：{name}")
+        if kind not in KIND_PREFIXES:
+            raise ValueError(f"未知素材类别：{kind}")
+        names.add(name)
+        scope = request.get("scope", "").strip() or f"episode-{episode_id}"
+        assets.append(
+            {
+                "name": name,
+                "kind": kind,
+                "scope": scope,
+                "visual_brief": visual_brief,
+                "prompt": _production_prompt(kind, visual_brief, settings.get("format", "")),
+                "status": "planned",
+                "image_path": "",
+            }
+        )
+
+    manifest_path = episode_dir / "asset-production-manifest.json"
+    manifest_path.write_text(
+        json.dumps({"episode_id": episode_id, "assets": assets}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    lines = [
+        f"# {episode_id} 本集资产生产单",
+        "",
+        "在大纲确认后、正式剧本与分镜前执行。生成图片后先请用户确认，再登记为本集素材并刷新交接包。",
+        "",
+        f"- 项目画幅：{settings.get('format') or '未设置，请先确认'}",
+        f"- 默认范围：episode-{episode_id}（除非用户明确确认可复用）",
+        "- 当前状态：待生成；尚未成为已锁定资产。",
+        "",
+    ]
+    for position, asset in enumerate(assets, start=1):
+        lines.extend(
+            [
+                f"## {position}. {asset['name']}（{asset['kind']}）",
+                "",
+                f"- 范围：{asset['scope']}",
+                f"- 视觉说明：{asset['visual_brief']}",
+                f"- 出图提示词：{asset['prompt']}",
+                "- 生成后：保存图片路径 → 用户确认 → 按名称登记资产 → 刷新 `storyboard-package.md`。",
+                "",
+            ]
+        )
+    plan_path = episode_dir / "asset-production-plan.md"
+    plan_path.write_text("\n".join(lines), encoding="utf-8")
+    return plan_path
+
+
 def resolve_asset_references(assets: list[dict[str, Any]], references: list[str]) -> list[str]:
     """Resolve user-facing names or aliases to stable internal asset IDs."""
     resolved: list[str] = []
