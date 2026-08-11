@@ -9,13 +9,9 @@ description: Use when initializing, organizing, migrating, or maintaining an AI 
 
 ## 启动依赖检查
 
-首次执行本 Skill 时，先运行：
+首次执行本 Skill 时，使用**本 Skill 安装目录内**的 `scripts/storyboard_dependency.py --install`（不能假定用户项目根目录有 `scripts/`）。它会检测同级 `seedance-storyboard-generator`；已安装则直接复用，缺失时才下载该 Skill 子目录。
 
-```bash
-python3 scripts/storyboard_dependency.py --install
-```
-
-它会检测同级 `seedance-storyboard-generator`；已安装则直接复用，缺失时才从 `liangdabiao/Seedance2-Storyboard-Generator` 下载该 Skill 子目录。安装成功后继续工作；下载或校验失败时，报告错误并停止分镜交接，不要假装依赖已可用。
+下载固定到脚本记录的上游提交和 SHA-256，安装后写入版本账本；下载或校验失败时，报告错误并停止分镜交接，不要假装依赖已可用。
 
 ## 操作路由
 
@@ -25,6 +21,7 @@ python3 scripts/storyboard_dependency.py --install
 | 整理/新增素材 | 以名称、别名、类别、范围和图片路径登记素材；内部自动维护 `Cxx`、`Sxx`、`Pxx`，默认新素材仅限本集。 |
 | 创建一集 | 创建剧情需求、本集状态、素材清单与交接包。 |
 | 生产本集资产 | 在大纲确认后，生成 `asset-production-plan.md` 和出图提示词；确认图片后再登记资产。 |
+| 结束一集 / 继续下一集 | 本集定稿后确认连续性记录；创建下一集时自动继承最近一份已确认记录。 |
 | 交给分镜 | 生成/更新 `storyboard-package.md`，随后调用 `$seedance-storyboard-generator`。 |
 | 审核/提升素材 | 确认剧集素材可跨集复用后，迁入全局库并更新索引。 |
 
@@ -35,6 +32,8 @@ python3 scripts/storyboard_dependency.py --install
 若项目还没有配置或缺少会影响创作的关键信息，只询问缺失项。默认创建流程必须产出本集需求、资产清单和交接包。
 
 用户说“这集 180 秒”“这集改为横屏”等只属于当前集的要求时，写入 `episode-overrides.yaml` 并在交接包中优先使用；不得改写项目默认配置或其他剧集。
+
+连续剧在本集剧本、分镜或成片定稿后，先根据定稿内容起草 `episode-continuity.md`，包含关键事件、角色状态、最后一帧、未解线索和下一集必须承接项；用户确认后调用 `record_episode_continuity` 标记为已确认。创建下一集时，自动读取直接前一集的已确认记录并写入交接包。若上一集记录仍是待确认，默认停止在确认节点；只有用户明确说本集是独立集时，才以 `standalone=True` 创建且不继承上集。
 
 ## 初始化与迁移
 
@@ -59,8 +58,8 @@ python3 scripts/storyboard_dependency.py --install
 
 1. 识别新增资产的名称、类别和视觉说明，调用 `create_asset_production_plan` 生成本集生产单。
 2. 展示生产单，待用户确认后再使用用户指定的图片工具生成参考图；也可接收用户提供的图片。
-3. 用户确认图片后，用 `register_project_asset` 按名称、别名、范围和图片路径登记。默认范围为 `episode-<ID>`；只有明确确认才提升为季度或全局资产。
-4. 将确认资产补入本集素材清单和交接包，随后再写正式剧本、镜头表和关键帧提示词。
+3. 图片先放入项目目录后，用 `provide_episode_asset_image` 登记图片路径；用户确认后必须使用 `confirm_episode_asset`。它会以迁移账本安全归档图片，再登记资产、更新生产状态、本集素材清单和交接包。默认范围为 `episode-<ID>`；只有明确确认才提升为季度或全局资产。
+4. 确认资产已进入更新后的交接包后，再写正式剧本、镜头表和关键帧提示词。
 
 未确认的生产单只能作为待生成草案，不能被分镜当作已锁定视觉素材。
 

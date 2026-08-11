@@ -20,17 +20,23 @@ from asset_migration import (  # noqa: E402
 )
 from project_files import (  # noqa: E402
     build_asset_index,
+    confirm_episode_asset,
     create_asset_production_plan,
     create_episode,
     initialize_project,
     register_asset,
     register_project_asset,
+    record_episode_continuity,
+    provide_episode_asset_image,
     resolve_asset_references,
     write_asset_index,
 )
 from extract_docx_text import extract_text  # noqa: E402
 from storyboard_dependency import (  # noqa: E402
     DependencyError,
+    UPSTREAM_ARCHIVE_SHA256,
+    UPSTREAM_ARCHIVE_URL,
+    UPSTREAM_REVISION,
     extract_skill_from_archive,
     find_installed_skill,
 )
@@ -218,6 +224,63 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertIn('episode_target_seconds: "120"', (root / "project-settings/project.yaml").read_text(encoding="utf-8"))
             self.assertIn('episode_target_seconds: "180"', (package.parent / "episode-overrides.yaml").read_text(encoding="utf-8"))
 
+    def test_confirmed_episode_continuity_is_automatically_handed_to_the_next_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None)
+            write_asset_index(root, [])
+            first_package = create_episode(root, "EP001", "雨夜来信", "许岚收到录音。", [])
+            continuity_path = first_package.parent / "episode-continuity.md"
+            self.assertIn("状态：待确认", continuity_path.read_text(encoding="utf-8"))
+
+            record_episode_continuity(
+                root,
+                "EP001",
+                events=["许岚收到一段匿名录音。"],
+                character_states=["许岚决定追查录音来源。"],
+                ending_frame="雨夜的旧书店门口，许岚握着录音笔望向远处。",
+                unresolved_threads=["录音是谁留下的？"],
+                next_episode_constraints=["第 2 集从旧书店门口继续。"],
+            )
+            second_package = create_episode(root, "EP002", "追查", "许岚开始调查录音。", [])
+            package_contents = second_package.read_text(encoding="utf-8")
+
+            self.assertIn("状态：已确认", continuity_path.read_text(encoding="utf-8"))
+            self.assertIn("## 上集承接", package_contents)
+            self.assertIn("许岚收到一段匿名录音", package_contents)
+            self.assertIn("第 2 集从旧书店门口继续", package_contents)
+
+    def test_pending_immediately_previous_episode_is_not_skipped_for_an_older_continuity_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None)
+            write_asset_index(root, [])
+            create_episode(root, "EP001", "开端", "第一集剧情。", [])
+            record_episode_continuity(
+                root,
+                "EP001",
+                events=["第一集已经发生的事件。"],
+                character_states=[],
+                ending_frame="第一集最后一帧。",
+                unresolved_threads=[],
+                next_episode_constraints=[],
+            )
+            create_episode(root, "EP002", "未定稿", "第二集还在修改。", [])
+
+            with self.assertRaisesRegex(ValueError, "EP002"):
+                create_episode(root, "EP003", "下一集", "第三集需求。", [])
+
+            third_package = create_episode(
+                root,
+                "EP003",
+                "独立下一集",
+                "这是一集独立故事。",
+                [],
+                standalone=True,
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("第一集已经发生的事件", third_package)
+            self.assertNotIn("## 上集承接", third_package)
+
     def test_episode_creation_resolves_asset_names_without_requiring_internal_ids(self) -> None:
         assets = [
             {"asset_id": "C01", "name": "咕噜", "aliases": ["小怪兽"], "kind": "characters", "scope": "global", "destination": "assets/global/characters/C01_gulu/front.png"},
@@ -239,6 +302,28 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertIn('format: ""', config)
             self.assertTrue((root / "project-settings/character-bible.md").is_file())
             self.assertFalse((root / "project-settings/source-document.json").exists())
+
+    def test_reinitializing_an_existing_project_refuses_to_overwrite_its_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None, frame_format="16:9")
+            register_project_asset(
+                root,
+                "许岚",
+                "characters",
+                "global",
+                "assets/global/characters/C01_xulan/reference.png",
+            )
+            create_episode(root, "EP001", "开端", "第一集。", ["许岚"])
+
+            with self.assertRaisesRegex(FileExistsError, "已初始化"):
+                initialize_project(root, "错误的新名字", None)
+
+            config = (root / "project-settings/project.yaml").read_text(encoding="utf-8")
+            assets = json.loads((root / "project-settings/asset-index.json").read_text(encoding="utf-8"))["assets"]
+            self.assertIn('project_name: "测试项目"', config)
+            self.assertEqual(assets[0]["name"], "许岚")
+            self.assertTrue((root / "episodes/EP001_开端/episode-continuity.md").is_file())
 
     def test_new_asset_references_become_episode_drafts_and_can_be_registered_by_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -304,6 +389,11 @@ class AssetMigrationTests(unittest.TestCase):
                 with self.assertRaisesRegex(DependencyError, "已存在"):
                     extract_skill_from_archive(archive, root)
 
+    def test_storyboard_dependency_is_pinned_to_a_revision_and_archive_hash(self) -> None:
+        self.assertIn(UPSTREAM_REVISION, UPSTREAM_ARCHIVE_URL)
+        self.assertNotIn("refs/heads/main", UPSTREAM_ARCHIVE_URL)
+        self.assertEqual(len(UPSTREAM_ARCHIVE_SHA256), 64)
+
     def test_readme_and_project_file_reference_explain_all_beginner_creation_modes(self) -> None:
         repository_root = Path(__file__).parents[1]
         readme = (repository_root / "README.md").read_text(encoding="utf-8")
@@ -354,6 +444,34 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertIn("旧书店", plan)
             self.assertEqual(manifest["assets"][0]["scope"], "episode-EP001")
             self.assertEqual(manifest["assets"][1]["status"], "planned")
+
+    def test_confirming_an_episode_asset_updates_manifest_assets_and_storyboard_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None)
+            package = create_episode(root, "EP001", "新朋友", "许岚遇见神秘访客。", ["神秘访客"])
+            create_asset_production_plan(
+                root,
+                "EP001",
+                [{"name": "神秘访客", "kind": "characters", "visual_brief": "深色风衣，表情克制"}],
+            )
+            image = self.write_file(root, "assets/pending/visitor.png", b"visitor-image")
+
+            provide_episode_asset_image(root, "EP001", "神秘访客", image)
+            asset = confirm_episode_asset(root, "EP001", "神秘访客")
+
+            manifest = json.loads((package.parent / "asset-production-manifest.json").read_text(encoding="utf-8"))
+            package_contents = package.read_text(encoding="utf-8")
+            episode_assets = (package.parent / "episode-assets.md").read_text(encoding="utf-8")
+            self.assertEqual(manifest["assets"][0]["status"], "registered")
+            self.assertEqual(manifest["assets"][0]["asset_id"], asset["asset_id"])
+            self.assertFalse(image.exists())
+            self.assertTrue((root / asset["destination"]).is_file())
+            self.assertEqual((root / asset["destination"]).read_bytes(), b"visitor-image")
+            self.assertIn("神秘访客", package_contents)
+            self.assertIn(asset["asset_id"], package_contents)
+            self.assertNotIn("神秘访客（默认本集专属）", package_contents)
+            self.assertIn("神秘访客", episode_assets)
 
     def test_initialize_and_register_project_asset_persist_full_configuration_by_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

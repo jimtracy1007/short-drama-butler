@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from asset_migration import build_plan, execute_plan, rollback
 from extract_docx_text import extract_text
 
 
@@ -53,6 +55,15 @@ def initialize_project(
 ) -> None:
     """Create the standard project layout and move the source document once."""
     root = project_root.resolve()
+    initialization_markers = (
+        root / "project-settings" / "project.yaml",
+        root / "project-settings" / "asset-index.json",
+    )
+    episode_root = root / "episodes"
+    if any(marker.exists() for marker in initialization_markers) or (
+        episode_root.is_dir() and any(episode_root.iterdir())
+    ):
+        raise FileExistsError("项目已初始化；请使用整理、更新或创建剧集流程，不能重新初始化并覆盖项目记忆")
     if source_document is not None:
         source_document = source_document.resolve()
         if source_document.parent != root or source_document.suffix.lower() != ".docx":
@@ -246,6 +257,82 @@ def _episode_directory(project_root: Path, episode_id: str) -> Path:
     return candidates[0]
 
 
+def _episode_sort_key(episode_id: str) -> tuple[int, int | str]:
+    match = re.search(r"(\d+)$", episode_id)
+    if match:
+        return (0, int(match.group(1)))
+    return (1, episode_id)
+
+
+def _is_confirmed_continuity(contents: str) -> bool:
+    """Recognize only the dedicated status field, not an incidental quote."""
+    return any(line.strip() == "- 状态：已确认" for line in contents.splitlines())
+
+
+def _immediately_previous_continuity(project_root: Path, episode_id: str) -> tuple[Path, str, bool] | None:
+    """Return the closest earlier episode record, including its confirmation state.
+
+    A pending immediate predecessor must never be skipped in favour of an older
+    confirmed episode: that would produce a plausible-looking but stale handoff.
+    """
+    current_key = _episode_sort_key(episode_id)
+    candidates: list[tuple[tuple[int, int | str], Path, str]] = []
+    for episode_dir in (project_root / "episodes").iterdir():
+        if not episode_dir.is_dir() or "_" not in episode_dir.name:
+            continue
+        candidate_id = episode_dir.name.split("_", 1)[0]
+        if _episode_sort_key(candidate_id) >= current_key:
+            continue
+        continuity_path = episode_dir / "episode-continuity.md"
+        if not continuity_path.is_file():
+            continue
+        contents = continuity_path.read_text(encoding="utf-8")
+        candidates.append((_episode_sort_key(candidate_id), continuity_path, contents))
+    if not candidates:
+        return None
+    _, path, contents = max(candidates, key=lambda item: item[0])
+    return path, contents, _is_confirmed_continuity(contents)
+
+
+def record_episode_continuity(
+    project_root: Path,
+    episode_id: str,
+    *,
+    events: list[str],
+    character_states: list[str],
+    ending_frame: str,
+    unresolved_threads: list[str],
+    next_episode_constraints: list[str],
+) -> Path:
+    """Confirm the durable handoff facts that the next episode must inherit."""
+    if not events:
+        raise ValueError("连续性记录至少需要一项本集关键事件")
+    if not ending_frame.strip():
+        raise ValueError("连续性记录需要最后一帧描述")
+    episode_dir = _episode_directory(project_root.resolve(), episode_id)
+    title = episode_dir.name.split("_", 1)[1]
+
+    def section(title: str, items: list[str]) -> list[str]:
+        cleaned_items = [item.strip() for item in items if item.strip()]
+        return [f"## {title}", "", *(f"- {item}" for item in cleaned_items or ["无"]), ""]
+
+    lines = [
+        f"# {episode_id}《{title}》连续性记录",
+        "",
+        "- 状态：已确认",
+        "- 用途：下一集创建与分镜交接时必须继承；不要依赖聊天记忆。",
+        "",
+    ]
+    lines.extend(section("本集关键事件", events))
+    lines.extend(section("角色当前状态", character_states))
+    lines.extend(["## 最后一帧", "", ending_frame.strip(), ""])
+    lines.extend(section("未解线索 / 钩子", unresolved_threads))
+    lines.extend(section("下一集必须承接", next_episode_constraints))
+    continuity_path = episode_dir / "episode-continuity.md"
+    continuity_path.write_text("\n".join(lines), encoding="utf-8")
+    return continuity_path
+
+
 def _production_prompt(kind: str, visual_brief: str, frame_format: str) -> str:
     shared = "遵守项目角色圣经、已确认素材与视觉冲突裁决；不添加文字、Logo 或水印。"
     if kind == "characters":
@@ -349,6 +436,202 @@ def resolve_asset_references(assets: list[dict[str, Any]], references: list[str]
     return resolved
 
 
+def _episode_state_path(episode_dir: Path) -> Path:
+    return episode_dir / "episode-state.json"
+
+
+def _read_episode_state(episode_dir: Path) -> dict[str, Any]:
+    state_path = _episode_state_path(episode_dir)
+    if not state_path.is_file():
+        raise FileNotFoundError(f"本集缺少内部状态文件：{state_path}")
+    return json.loads(state_path.read_text(encoding="utf-8"))
+
+
+def _write_episode_state(episode_dir: Path, state: dict[str, Any]) -> None:
+    _episode_state_path(episode_dir).write_text(
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def _write_episode_assets_file(episode_dir: Path, assets_by_id: dict[str, dict[str, Any]], state: dict[str, Any]) -> None:
+    asset_ids = state.get("asset_ids", [])
+    new_asset_drafts = state.get("new_asset_drafts", [])
+    unknown_ids = [asset_id for asset_id in asset_ids if asset_id not in assets_by_id]
+    if unknown_ids:
+        raise ValueError(f"本集状态引用了不存在的素材：{', '.join(unknown_ids)}")
+    (episode_dir / "episode-assets.md").write_text(
+        "# 本集素材\n\n"
+        "## 可用资产\n\n"
+        + ("\n".join(f"- {assets_by_id[asset_id].get('name', asset_id)}（{asset_id}）" for asset_id in asset_ids) or "- 无")
+        + "\n\n## 本集新增资产（待生成 / 待确认）\n\n"
+        + ("\n".join(f"- {name}（默认本集专属；确认后才可提升为全局资产）" for name in new_asset_drafts) or "- 无")
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _replace_markdown_section(contents: str, heading: str, body: str) -> str:
+    marker = f"## {heading}\n\n"
+    start = contents.find(marker)
+    if start < 0:
+        raise ValueError(f"交接包缺少章节：{heading}")
+    body_start = start + len(marker)
+    next_heading = contents.find("\n## ", body_start)
+    if next_heading < 0:
+        next_heading = len(contents)
+    return contents[:body_start] + body.rstrip() + "\n\n" + contents[next_heading + 1 :]
+
+
+def _refresh_episode_asset_handoff(project_root: Path, episode_id: str) -> None:
+    """Refresh the asset-facing files after a confirmed episode asset changes state."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    state = _read_episode_state(episode_dir)
+    index = json.loads((root / "project-settings" / "asset-index.json").read_text(encoding="utf-8"))
+    assets_by_id = {asset["asset_id"]: asset for asset in index["assets"]}
+    _write_episode_assets_file(episode_dir, assets_by_id, state)
+
+    asset_ids = state.get("asset_ids", [])
+    rows = "\n".join(
+        f"| {asset['asset_id']} | {asset.get('name', asset['asset_id'])} | {asset['kind']} | {asset['scope']} | `{asset['destination']}` |"
+        for asset_id in asset_ids
+        for asset in [assets_by_id[asset_id]]
+    )
+    labels = "\n".join(
+        f"- {asset['asset_id']}｜{asset.get('name', asset['asset_id'])}"
+        for asset_id in asset_ids
+        for asset in [assets_by_id[asset_id]]
+    )
+    locked_assets = (
+        f"{labels or '- 无'}\n\n"
+        "| ID | 名称 | 类别 | 范围 | 图片路径 |\n| --- | --- | --- | --- | --- |\n"
+        f"{rows or '| — | 无 | — | — | — |'}"
+    )
+    drafts = "\n".join(
+        f"- {name}（默认本集专属）" for name in state.get("new_asset_drafts", [])
+    ) or "- 无"
+    package_path = episode_dir / "storyboard-package.md"
+    contents = package_path.read_text(encoding="utf-8")
+    contents = _replace_markdown_section(contents, "已锁定资产", locked_assets)
+    contents = _replace_markdown_section(contents, "本集新增资产（待生成 / 待确认）", drafts)
+    package_path.write_text(contents, encoding="utf-8")
+
+
+def _find_manifest_asset(manifest: dict[str, Any], name: str) -> dict[str, Any]:
+    matches = [asset for asset in manifest.get("assets", []) if asset.get("name") == name]
+    if not matches:
+        raise ValueError(f"本集资产生产单中找不到：{name}")
+    if len(matches) > 1:
+        raise ValueError(f"本集资产生产单中名称不唯一：{name}")
+    return matches[0]
+
+
+def _asset_slug(name: str) -> str:
+    """Make a stable path segment without exposing user-facing names as IDs."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "asset"
+
+
+def provide_episode_asset_image(project_root: Path, episode_id: str, name: str, image_path: Path) -> Path:
+    """Record a project-local image as supplied, but do not yet make it usable."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    image = image_path.resolve()
+    if not image.is_file():
+        raise FileNotFoundError(f"找不到图片：{image_path}")
+    try:
+        relative_image = image.relative_to(root).as_posix()
+    except ValueError as error:
+        raise ValueError("图片必须先放入项目目录，再登记为本集资产") from error
+    manifest_path = episode_dir / "asset-production-manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError("本集尚未创建资产生产单")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    asset = _find_manifest_asset(manifest, name)
+    if asset.get("status") not in {"planned", "image_provided"}:
+        raise ValueError(f"素材当前不能接收图片：{name}（{asset.get('status')}）")
+    asset["status"] = "image_provided"
+    asset["image_path"] = relative_image
+    asset.setdefault("history", []).append({"status": "image_provided", "at": datetime.now(timezone.utc).isoformat()})
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return manifest_path
+
+
+def confirm_episode_asset(
+    project_root: Path,
+    episode_id: str,
+    name: str,
+    *,
+    aliases: list[str] | None = None,
+    scope: str | None = None,
+) -> dict[str, Any]:
+    """Confirm a supplied image, register it, and refresh this episode's handoff."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    manifest_path = episode_dir / "asset-production-manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError("本集尚未创建资产生产单")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    planned_asset = _find_manifest_asset(manifest, name)
+    if planned_asset.get("status") != "image_provided":
+        raise ValueError("请先登记图片路径，再由用户确认素材")
+    image_path = str(planned_asset.get("image_path", "")).strip()
+    if not image_path or not (root / image_path).is_file():
+        raise FileNotFoundError("已登记的素材图片不存在")
+    final_scope = scope or str(planned_asset.get("scope", "")).strip()
+    if not final_scope:
+        raise ValueError("素材缺少范围")
+    index_path = root / "project-settings" / "asset-index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    assets: list[dict[str, Any]] = index["assets"]
+    registered = register_asset(
+        assets,
+        name,
+        str(planned_asset["kind"]),
+        final_scope,
+        "pending-destination",
+        aliases=aliases,
+    )
+    plan = build_plan(
+        root,
+        [
+            {
+                "source": image_path,
+                "asset_id": registered["asset_id"],
+                "kind": registered["kind"],
+                "scope": final_scope,
+                "slug": _asset_slug(name),
+                "variant": "reference",
+            }
+        ],
+    )
+    destination = plan["records"][0]["destination"]
+    registered["destination"] = destination
+    registered["views"] = [{"variant": "reference", "path": destination}]
+    ledger_path = execute_plan(root, plan)
+    try:
+        write_asset_index(root, assets)
+    except Exception:
+        rollback(root, ledger_path)
+        raise
+    planned_asset["status"] = "user_confirmed"
+    planned_asset.setdefault("history", []).append({"status": "user_confirmed", "at": datetime.now(timezone.utc).isoformat()})
+    planned_asset["image_path"] = destination
+    planned_asset["status"] = "registered"
+    planned_asset["asset_id"] = registered["asset_id"]
+    planned_asset["scope"] = final_scope
+    planned_asset.setdefault("history", []).append({"status": "registered", "at": datetime.now(timezone.utc).isoformat()})
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    state = _read_episode_state(episode_dir)
+    if registered["asset_id"] not in state["asset_ids"]:
+        state["asset_ids"].append(registered["asset_id"])
+    state["new_asset_drafts"] = [draft for draft in state["new_asset_drafts"] if draft != name]
+    _write_episode_state(episode_dir, state)
+    _refresh_episode_asset_handoff(root, episode_id)
+    return registered
+
+
 def create_episode(
     project_root: Path,
     episode_id: str,
@@ -357,6 +640,7 @@ def create_episode(
     asset_references: list[str],
     *,
     episode_overrides: dict[str, Any] | None = None,
+    standalone: bool = False,
 ) -> Path:
     """Create an episode folder and its explicit Storyboard Generator handoff."""
     root = project_root.resolve()
@@ -384,6 +668,13 @@ def create_episode(
             if asset_id not in asset_ids:
                 asset_ids.append(asset_id)
 
+    previous_continuity = _immediately_previous_continuity(root, episode_id)
+    if previous_continuity is not None and not previous_continuity[2] and not standalone:
+        pending_path = previous_continuity[0].relative_to(root).as_posix()
+        raise ValueError(
+            f"前序剧集 {pending_path} 的连续性尚未确认；请先确认，或明确声明本集为独立集"
+        )
+
     episode_dir = root / "episodes" / f"{episode_id}_{episode_title}"
     if episode_dir.exists():
         raise FileExistsError(f"剧集目录已存在：{episode_dir}")
@@ -394,15 +685,22 @@ def create_episode(
             encoding="utf-8",
         )
     (episode_dir / "story-brief.md").write_text(f"# {episode_title}\n\n{story_brief}\n", encoding="utf-8")
-    (episode_dir / "episode-assets.md").write_text(
-        "# 本集素材\n\n"
-        "## 可用资产\n\n"
-        + ("\n".join(f"- {assets_by_id[asset_id].get('name', asset_id)}（{asset_id}）" for asset_id in asset_ids) or "- 无")
-        + "\n\n## 本集新增资产（待生成 / 待确认）\n\n"
-        + ("\n".join(f"- {name}（默认本集专属；确认后才可提升为全局资产）" for name in new_asset_drafts) or "- 无")
-        + "\n",
+    episode_state = {
+        "version": 1,
+        "episode_id": episode_id,
+        "episode_title": episode_title,
+        "story_brief": story_brief,
+        "asset_ids": asset_ids,
+        "new_asset_drafts": new_asset_drafts,
+    }
+    _write_episode_state(episode_dir, episode_state)
+    (episode_dir / "episode-continuity.md").write_text(
+        f"# {episode_id}《{episode_title}》连续性记录\n\n"
+        "- 状态：待确认\n"
+        "- 用途：本集定稿后记录关键事件、角色状态、最后一帧和下一集承接要求。\n",
         encoding="utf-8",
     )
+    _write_episode_assets_file(episode_dir, assets_by_id, episode_state)
     rows = "\n".join(
         f"| {asset['asset_id']} | {asset.get('name', asset['asset_id'])} | {asset['kind']} | {asset['scope']} | `{asset['destination']}` |"
         for asset_id in asset_ids
@@ -424,6 +722,17 @@ def create_episode(
     fixed_settings = root / "project-settings" / "fixed-settings-source.txt"
     if fixed_settings.is_file():
         context_files.append("project-settings/fixed-settings-source.txt")
+    continuity_section = ""
+    if previous_continuity is not None:
+        continuity_path, continuity_contents, is_confirmed = previous_continuity
+        continuity_relative_path = continuity_path.relative_to(root).as_posix()
+        if is_confirmed and not standalone:
+            context_files.append(continuity_relative_path)
+            continuity_section = (
+                "## 上集承接（锁定）\n\n"
+                f"来源：`{continuity_relative_path}`。未经用户明确确认，不得改写以下连续性事实。\n\n"
+                f"{continuity_contents}\n\n"
+            )
     context_list = "、".join(f"`{path}`" for path in context_files)
     package = episode_dir / "storyboard-package.md"
     override_section = ""
@@ -441,6 +750,8 @@ def create_episode(
         f"- 内容限制：{effective_settings.get('content_guidelines') or '未设置，请先确认'}。\n"
         f"- 制作流程：{configured_workflow}。\n\n"
         + override_section
+        +
+        continuity_section
         +
         "## 交接优先级\n\n"
         "本交接包与引用的项目配置是本集创作的最高优先级；它们覆盖分镜 Skill 的任何默认受众、画幅、时长、镜头数和内容尺度。\n\n"

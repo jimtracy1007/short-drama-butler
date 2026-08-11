@@ -4,17 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import shutil
 import tempfile
 import urllib.request
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 SKILL_NAME = "seedance-storyboard-generator"
-UPSTREAM_ARCHIVE_URL = "https://github.com/liangdabiao/Seedance2-Storyboard-Generator/archive/refs/heads/main.zip"
+UPSTREAM_REVISION = "17b9ca6dfac3e4a086a2874791ef19ae5aae3932"
+UPSTREAM_ARCHIVE_URL = f"https://github.com/liangdabiao/Seedance2-Storyboard-Generator/archive/{UPSTREAM_REVISION}.zip"
+UPSTREAM_ARCHIVE_SHA256 = "c6b1a1f982b83adc9998e4a862ac1cab97120cd5ba4012d255452b63a3387f2c"
 UPSTREAM_SKILL_SUFFIX = Path(".claude/skills") / SKILL_NAME
 
 
@@ -67,18 +71,40 @@ def extract_skill_from_archive(archive: zipfile.ZipFile, skill_root: Path) -> Pa
     return destination
 
 
-def install_skill(skill_root: Path, archive_url: str = UPSTREAM_ARCHIVE_URL) -> Path:
-    """Download the public upstream archive and install the precise Skill subtree."""
+def install_skill(
+    skill_root: Path,
+    archive_url: str = UPSTREAM_ARCHIVE_URL,
+    expected_sha256: str = UPSTREAM_ARCHIVE_SHA256,
+) -> Path:
+    """Install one pinned, hash-verified upstream Skill subtree."""
     try:
         with urllib.request.urlopen(archive_url, timeout=30) as response:
             archive_bytes = response.read()
     except OSError as error:
         raise DependencyError(f"无法下载 Storyboard Generator：{error}") from error
+    actual_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise DependencyError("上游 Storyboard Generator 校验失败：压缩包哈希不匹配")
     try:
         with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
-            return extract_skill_from_archive(archive, skill_root)
+            installed = extract_skill_from_archive(archive, skill_root)
     except zipfile.BadZipFile as error:
         raise DependencyError("上游下载内容不是有效 ZIP 文件") from error
+    (installed / ".short-drama-butler-dependency.json").write_text(
+        json.dumps(
+            {
+                "source": "liangdabiao/Seedance2-Storyboard-Generator",
+                "revision": UPSTREAM_REVISION,
+                "archive_sha256": actual_sha256,
+                "installed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return installed
 
 
 def default_skill_roots() -> list[Path]:
