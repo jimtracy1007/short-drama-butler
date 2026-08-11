@@ -67,6 +67,8 @@ description: Use when initializing, organizing, migrating, or maintaining an AI 
 
 ## 剧本、分镜与关键帧关口
 
+调用 `seedance-storyboard-generator` 时，让它生成 `formal-script.md` 和 `storyboard.md`。前者是剧本源文件；后者是分镜源文件，逐镜必须保留镜号、时长、景别、运镜、画面起点 / 动作过程 / 画面终点、台词、声音策略、音效、入点、出点 / 转场、素材参考和分镜出图提示词。不要另写简化版故事或简化版分镜。
+
 正式剧本和镜头表完成后，必须先展示二者并询问用户是否符合要求、是否要调整；收到明确确认后调用 `record_script_and_storyboard_approval` 写入 `creative-review.md`。没有这项确认，不得调用 `create_keyframe_plan`，更不得使用图片工具生成关键帧。
 
 随后按每镜的实际动作、镜头时长和叙事重要性创建 `keyframe-plan.md`：
@@ -76,6 +78,8 @@ description: Use when initializing, organizing, migrating, or maintaining an AI 
 - `start_middle_end`：分阶段动作、变形/魔法、复杂走位、重要转折或较长镜头；需首帧、过程帧、尾帧。
 
 先展示逐镜帧数与每帧用途，等待用户确认。收到确认后调用 `approve_keyframe_plan`；只有 `assert_keyframe_generation_allowed` 成功时才可生成关键帧。多帧的价值来自清晰的阶段差异和工具支持，不得用近似重复图凑数量；同一镜的图片应明确标注为首 / 过程 / 尾帧，便于交给图生视频工具。
+
+关键帧执行阶段调用 `create_keyframe_execution_pack`。它从已确认分镜逐镜建立 `keyframe-execution.md`：保留时长、镜头语言、画面三阶段、台词、声音策略、音效、入点、出点 / 转场、按名称的素材参考和原分镜出图提示词；只新增 `KF<镜号>-start/middle/end.png` 文件以及对应帧图提示词，并合成可复制的视频生成提示词。不得把它降级为一句动作说明。详细字段见 [references/storyboard-to-keyframes.md](references/storyboard-to-keyframes.md)。
 
 交接包模板和必含字段见 [references/storyboard-handoff.md](references/storyboard-handoff.md)。
 与 Seedance Storyboard Generator 或其他分镜 Skill 的覆盖规则见 [references/seedance-integration-protocol.md](references/seedance-integration-protocol.md)。

@@ -608,6 +608,168 @@ def assert_keyframe_generation_allowed(project_root: Path, episode_id: str) -> b
     return True
 
 
+KEYFRAME_EXECUTION_FIELDS = (
+    "shot_size",
+    "camera_movement",
+    "scene",
+    "start_state",
+    "motion",
+    "end_state",
+    "dialogue",
+    "voice_strategy",
+    "sound_effects",
+    "transition_in",
+    "transition_out",
+    "storyboard_image_prompt",
+)
+
+
+def _keyframe_filename(shot_id: str, frame_kind: str) -> str:
+    """Name a generated frame by its source storyboard shot and narrative position."""
+    return f"KF{shot_id}-{frame_kind}.png"
+
+
+def _validate_execution_details(
+    planned_shots: list[dict[str, Any]], details: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    expected_by_id = {str(shot["shot_id"]): shot for shot in planned_shots}
+    actual_by_id: dict[str, dict[str, Any]] = {}
+    for detail in details:
+        shot_id = str(detail.get("shot_id", "")).strip()
+        if not shot_id:
+            raise ValueError("关键帧执行单的每项都需要镜号")
+        if shot_id in actual_by_id:
+            raise ValueError(f"关键帧执行单存在重复镜号：{shot_id}")
+        if shot_id not in expected_by_id:
+            raise ValueError(f"关键帧执行单包含未规划镜头：{shot_id}")
+        actual_by_id[shot_id] = detail
+    if set(actual_by_id) != set(expected_by_id):
+        missing = "、".join(shot_id for shot_id in expected_by_id if shot_id not in actual_by_id)
+        raise ValueError(f"关键帧执行单缺少已确认镜头：{missing}")
+
+    validated: list[dict[str, Any]] = []
+    for planned in planned_shots:
+        shot_id = str(planned["shot_id"])
+        detail = actual_by_id[shot_id]
+        missing = [field for field in KEYFRAME_EXECUTION_FIELDS if not str(detail.get(field, "")).strip()]
+        if missing:
+            raise ValueError(f"镜头 {shot_id} 缺少执行字段：{', '.join(missing)}")
+        references = detail.get("asset_references", [])
+        if not isinstance(references, list) or not all(str(reference).strip() for reference in references):
+            raise ValueError(f"镜头 {shot_id} 需要至少一个按名称说明的素材参考")
+        frame_prompts = detail.get("frame_prompts", {})
+        if not isinstance(frame_prompts, dict) or set(frame_prompts) != set(planned["frames"]):
+            expected = "、".join(planned["frames"])
+            raise ValueError(f"镜头 {shot_id} 的关键帧提示词必须恰好包含：{expected}")
+        if any(not str(prompt).strip() for prompt in frame_prompts.values()):
+            raise ValueError(f"镜头 {shot_id} 的关键帧提示词不能为空")
+        validated.append(
+            {
+                "shot_id": shot_id,
+                "duration_seconds": planned["duration_seconds"],
+                "frame_strategy": planned["strategy"],
+                "frame_strategy_label": planned["strategy_label"],
+                "frames": planned["frames"],
+                "action": planned["action"],
+                "asset_references": [str(reference).strip() for reference in references],
+                **{field: str(detail[field]).strip() for field in KEYFRAME_EXECUTION_FIELDS},
+                "frame_prompts": {frame: str(frame_prompts[frame]).strip() for frame in planned["frames"]},
+            }
+        )
+    return validated
+
+
+def create_keyframe_execution_pack(
+    project_root: Path,
+    episode_id: str,
+    shot_details: list[dict[str, Any]],
+) -> Path:
+    """Mirror confirmed storyboard details into a tool-ready, per-shot keyframe execution file."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    assert_keyframe_generation_allowed(root, episode_id)
+    manifest_path = episode_dir / "keyframe-manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError("本集尚未创建关键帧方案")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("status") != "user_confirmed":
+        raise ValueError("关键帧方案尚未获用户确认，不能创建执行单")
+    shots = _validate_execution_details(manifest.get("shots", []), shot_details)
+    settings = _read_project_settings(root)
+    frame_format = settings.get("format") or "项目指定画幅"
+
+    blocks = [
+        f"# {episode_id} 关键帧执行单",
+        "",
+        "本文件逐镜继承已确认分镜的时长、画面、台词、声音、转场与提示词；只额外补关键帧文件和每张帧图提示词。它不是新的剧本或简化版分镜。",
+        "",
+        "- 前置确认：正式剧本、分镜表和关键帧方案均已获用户确认。",
+        f"- 画幅：{frame_format}",
+        "- 图生视频规则：每镜只执行本镜动作；对白是否在视频内生成由“声音策略”决定。",
+        "",
+    ]
+    for shot in shots:
+        duration = f"{shot['duration_seconds']:g} 秒"
+        reference_labels = "、".join(shot["asset_references"])
+        video_prompt = (
+            f"{duration}，{frame_format}，{shot['shot_size']}，{shot['camera_movement']}。"
+            f"场景：{shot['scene']}。起始画面：{shot['start_state']}。"
+            f"动作过程：{shot['motion']}。结束画面：{shot['end_state']}。"
+            f"声音策略：{shot['voice_strategy']}；台词：{shot['dialogue']}；音效：{shot['sound_effects']}。"
+            f"入点：{shot['transition_in']}。出点 / 转场：{shot['transition_out']}。"
+            f"参考素材：{reference_labels}。保持角色、场景、道具与已确认素材一致；不要字幕、文字、Logo 或水印。"
+        )
+        frame_rows = "\n".join(
+            f"| {frame} | `keyframes/pending/{_keyframe_filename(shot['shot_id'], frame)}` | {shot['frame_prompts'][frame]} |"
+            for frame in shot["frames"]
+        )
+        blocks.extend(
+            [
+                f"## KF{shot['shot_id']}｜{shot['frame_strategy_label']}",
+                "",
+                f"- 时长：{duration}",
+                f"- 景别：{shot['shot_size']}",
+                f"- 运镜：{shot['camera_movement']}",
+                f"- 场景：{shot['scene']}",
+                f"- 素材参考：{reference_labels}",
+                f"- 画面起点：{shot['start_state']}",
+                f"- 动作过程：{shot['motion']}",
+                f"- 画面终点：{shot['end_state']}",
+                f"- 台词：{shot['dialogue']}",
+                f"- 声音策略：{shot['voice_strategy']}",
+                f"- 音效：{shot['sound_effects']}",
+                f"- 入点：{shot['transition_in']}",
+                f"- 出点 / 转场：{shot['transition_out']}",
+                "",
+                "### 原分镜出图提示词",
+                "",
+                shot["storyboard_image_prompt"],
+                "",
+                "### 关键帧文件与出图提示词",
+                "",
+                "| 帧类型 | 文件 | 出图提示词 |",
+                "| --- | --- | --- |",
+                frame_rows,
+                "",
+                "### 图生视频提示词",
+                "",
+                video_prompt,
+                "",
+            ]
+        )
+    execution_path = episode_dir / "keyframe-execution.md"
+    execution_path.write_text("\n".join(blocks), encoding="utf-8")
+    (episode_dir / "keyframe-execution-manifest.json").write_text(
+        json.dumps({"episode_id": episode_id, "status": "ready", "shots": shots}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    state = _read_episode_state(episode_dir)
+    state["keyframe_execution_status"] = "ready"
+    state["keyframe_execution_path"] = "keyframe-execution.md"
+    _write_episode_state(episode_dir, state)
+    return execution_path
+
+
 def _write_episode_assets_file(episode_dir: Path, assets_by_id: dict[str, dict[str, Any]], state: dict[str, Any]) -> None:
     asset_ids = state.get("asset_ids", [])
     new_asset_drafts = state.get("new_asset_drafts", [])
@@ -950,7 +1112,10 @@ def create_episode(
         f"{chr(10).join(f'- {name}（默认本集专属）' for name in new_asset_drafts) or '- 无'}\n\n"
         "## 交给 Storyboard Generator 的任务\n\n"
         + (f"使用 `${configured_skill}`" if configured_skill else "使用项目指定的分镜 Skill")
-        + f" 阅读本文件与 {context_list}，先输出故事梗概、人物小传和本集大纲，等待确认后再写正式剧本并拆分镜头表。必须遵守上方交接优先级，不得套用冲突的默认规则。\n"
+        + f" 阅读本文件与 {context_list}，先输出故事梗概、人物小传和本集大纲，等待确认后再写 `formal-script.md` 和 `storyboard.md`。"
+        "正式剧本使用场次、镜头动作和角色对白；分镜表逐镜必须保留：镜号、预估时长、景别、镜头运动、画面内容、台词 / 声音策略 / 入点 / 出点、资产参考、分镜出图提示词。"
+        "不得把分镜压缩成只有动作的一句提示。用户确认剧本和分镜后，短剧管家才会从该分镜逐镜生成关键帧执行单；执行单继承全部分镜字段，只额外增加首 / 过程 / 尾帧文件与各帧出图提示词。"
+        "必须遵守上方交接优先级，不得套用冲突的默认规则。\n"
     )
     package.write_text(
         package_contents,

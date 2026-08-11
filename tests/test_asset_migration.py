@@ -25,6 +25,7 @@ from project_files import (  # noqa: E402
     confirm_episode_asset,
     create_asset_production_plan,
     create_episode,
+    create_keyframe_execution_pack,
     create_keyframe_plan,
     initialize_project,
     register_asset,
@@ -141,6 +142,9 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertIn("镜头数量由剧情节奏、动作、对白和情绪变化决定", contents)
             self.assertIn("C01｜咕噜", contents)
             self.assertIn("fixed-settings-source.txt", contents)
+            self.assertIn("formal-script.md", contents)
+            self.assertIn("storyboard.md", contents)
+            self.assertIn("台词 / 声音策略 / 入点 / 出点", contents)
             self.assertEqual((root / "project-settings/fixed-settings-source.txt").read_text(encoding="utf-8"), "旧设定文本\n")
 
     def test_asset_index_groups_multiple_views_under_one_asset_id(self) -> None:
@@ -195,6 +199,59 @@ class AssetMigrationTests(unittest.TestCase):
 
             approve_keyframe_plan(root, "EP001")
             self.assertTrue(assert_keyframe_generation_allowed(root, "EP001"))
+
+    def test_keyframe_execution_pack_preserves_storyboard_fields_and_adds_frame_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None, frame_format="16:9", episode_target_seconds=120)
+            create_episode(root, "EP001", "海边新朋友", "咕噜帮助小螃蟹回海。", [])
+            episode_dir = root / "episodes/EP001_海边新朋友"
+            (episode_dir / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
+            (episode_dir / "storyboard.md").write_text("# 分镜表\n", encoding="utf-8")
+            record_script_and_storyboard_approval(root, "EP001")
+            create_keyframe_plan(
+                root,
+                "EP001",
+                [{"shot_id": "02", "duration_seconds": 7, "action": "小螃蟹沿水道回海", "strategy": "start_end"}],
+            )
+            approve_keyframe_plan(root, "EP001")
+
+            execution_path = create_keyframe_execution_pack(
+                root,
+                "EP001",
+                [
+                    {
+                        "shot_id": "02",
+                        "shot_size": "低机位中景",
+                        "camera_movement": "缓慢跟拍",
+                        "scene": "泡泡湾海滩水道",
+                        "asset_references": ["小螃蟹", "泡泡湾海滩"],
+                        "start_state": "小螃蟹抱住小贝壳，站在水道起点",
+                        "motion": "横着走三步，水面泛起细小涟漪",
+                        "end_state": "小螃蟹靠近浅海并回头",
+                        "dialogue": "咕噜（画外音）：慢慢走，我陪你走。",
+                        "voice_strategy": "后期配音，不要求视频生成口型",
+                        "sound_effects": "浅水流动、细小脚步、远处海浪",
+                        "transition_in": "承接上一镜水道刚被注满的水流声",
+                        "transition_out": "小螃蟹回头的视线切至浅海挥钳镜头",
+                        "storyboard_image_prompt": "软萌3D儿童动画，低机位中景，小螃蟹抱贝壳走在浅水道中，金色湿沙与明亮海面。",
+                        "frame_prompts": {
+                            "start": "软萌3D儿童动画，低机位中景，小螃蟹抱住小贝壳站在水道起点。",
+                            "end": "软萌3D儿童动画，低机位中景，小螃蟹抱住小贝壳靠近浅海并回头。",
+                        },
+                    }
+                ],
+            )
+
+            contents = execution_path.read_text(encoding="utf-8")
+            self.assertIn("- 时长：7 秒", contents)
+            self.assertIn("- 台词：咕噜（画外音）：慢慢走，我陪你走。", contents)
+            self.assertIn("- 声音策略：后期配音，不要求视频生成口型", contents)
+            self.assertIn("- 入点：承接上一镜水道刚被注满的水流声", contents)
+            self.assertIn("- 出点 / 转场：小螃蟹回头的视线切至浅海挥钳镜头", contents)
+            self.assertIn("KF02-start.png", contents)
+            self.assertIn("KF02-end.png", contents)
+            self.assertIn("7 秒，16:9，低机位中景，缓慢跟拍", contents)
 
     def test_handoff_explicitly_overrides_storyboard_generator_short_form_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -460,6 +517,7 @@ class AssetMigrationTests(unittest.TestCase):
         ):
             self.assertIn(heading, readme)
         self.assertNotIn("读取当前项目配置，创建剧情需求、本集状态、素材清单和 Storyboard 交接包", readme)
+        self.assertIn("keyframe-execution.md", readme)
         for filename in (
             "story-brief.md",
             "episode-assets.md",
@@ -468,6 +526,8 @@ class AssetMigrationTests(unittest.TestCase):
             "creative-review.md",
             "keyframe-plan.md",
             "keyframe-manifest.json",
+            "keyframe-execution.md",
+            "keyframe-execution-manifest.json",
             "storyboard-package.md",
         ):
             self.assertIn(filename, project_files)
