@@ -47,7 +47,7 @@ templates/                        新建资料时使用的模板
 | `episode-assets.md` | 创建这一集时 | “现在有哪些已确认资产？还缺哪些？” | 参考；新增草案不能当锁定资产。 |
 | `asset-production-plan.md` | 大纲确认后且有新增资产时 | “新增角色、场景、道具的图什么时候、按什么标准制作？” | 用于图片生产；不是分镜输入。 |
 | `asset-production-manifest.json` | 创建资产生产单时 | “每项计划资产的状态和预留图片路径是什么？” | 供 Agent / 工具更新；状态依次为 `planned → image_provided → user_confirmed → registered`。 |
-| `creative-review.md` | 用户确认正式剧本与分镜后 | “当前剧本与分镜可以进入关键帧阶段吗？” | 第一确认关口；必须同时存在 `formal-script.md` 与 `storyboard.md`。 |
+| `creative-review.md` | 用户确认正式剧本与分镜后 | “当前剧本与分镜可以进入关键帧阶段吗？” | 第一确认关口；必须同时存在 `formal-script.md` 与通过导演版结构校验的 `storyboard.md`。 |
 | `keyframe-plan.md` | 剧本与分镜确认后 | “默认 1 / 2 张，哪一镜确实需要过程帧？” | 用户确认的逐镜出图计划；未确认不能生成关键帧；第三帧须逐镜明确确认。 |
 | `keyframe-manifest.json` | 创建关键帧方案时 | “关键帧方案的确认状态、每镜帧类型与过程帧例外原因是什么？” | 供 Agent / 工具执行；状态为 `user_pending → user_confirmed`，未明确确认的过程帧会降为两帧。 |
 | `keyframe-execution.md` | 关键帧方案确认后 | “这一镜的时长、对白、声音、转场、参考素材和各帧文件是什么？” | 分镜的生产镜像；保留原分镜内容，只增加 `KF<镜号>-start/middle/end.png` 与逐帧出图提示词。 |
@@ -74,6 +74,8 @@ storyboard-package.md：作为锁定素材交给分镜
 
 ```text
 正式剧本 + 导演版逐镜分镜完成
+        ↓
+validate_director_storyboard.py：拒绝表格、6 / 7 秒镜头和缺失标题
         ↓
 用户确认：creative-review.md
         ↓

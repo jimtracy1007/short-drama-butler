@@ -342,8 +342,11 @@ class AssetMigrationTests(unittest.TestCase):
         self.assertIn("75 秒", package)
         self.assertIn("最高优先级", package)
         self.assertIn("导演版逐镜说明", package)
+        self.assertIn("开头固定为“《剧名》<本集目标时长>秒导演版分镜", package)
+        self.assertIn("整体时长：…、画面规格：…、固定场景：…、本集主题：…", package)
         self.assertIn("5 秒或 10 秒", package)
         self.assertIn("10 秒镜头默认首帧与尾帧", package)
+        self.assertIn("validate_director_storyboard.py", package)
         self.assertNotIn("分镜表逐镜必须", package)
         self.assertNotIn("fixed-settings-source.txt", package)
 
@@ -358,9 +361,24 @@ class AssetMigrationTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("导演版逐镜说明", protocol)
+        self.assertIn("整体时长：<本集目标时长>", protocol)
+        self.assertIn("画面规格：<画幅、风格与画面限制>", protocol)
+        self.assertIn("固定场景：<固定场景与空间关系>", protocol)
+        self.assertIn("本集主题：<主题>", protocol)
         self.assertIn("首帧 A 画面", protocol)
         self.assertIn("10 秒默认 2 张", protocol)
+        for heading in ("首帧 A 画面", "尾帧 B 画面", "运镜", "台词与口型时间段", "非说话嘴型控制"):
+            self.assertIn(heading, protocol)
         self.assertNotIn("分镜表逐镜必须", protocol)
+
+        butler_skill = (
+            Path(__file__).parents[1]
+            / ".agents"
+            / "skills"
+            / "short-drama-butler"
+            / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("validate_director_storyboard.py", butler_skill)
 
     def test_docx_extractor_preserves_chinese_paragraphs_without_external_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
