@@ -67,17 +67,13 @@ description: Use when initializing, organizing, migrating, or maintaining an AI 
 
 ## 剧本、分镜与关键帧关口
 
-调用 `seedance-storyboard-generator` 时，让它生成 `formal-script.md` 和 `storyboard.md`。前者是剧本源文件；后者是分镜源文件，逐镜必须保留镜号、时长、景别、运镜、画面起点 / 动作过程 / 画面终点、台词、声音策略、音效、入点、出点 / 转场、素材参考和分镜出图提示词。不要另写简化版故事或简化版分镜。
+调用 `seedance-storyboard-generator` 时，让它生成 `formal-script.md` 和 `storyboard.md`。前者是剧本源文件；后者是分镜源文件，默认用**导演版逐镜说明**，不是 Markdown 表格：先写整体时长、画面规格、固定场景、本集主题和必要的关键视觉设定，再逐镜写完整生产信息。每镜必须保留镜号、时长、景别、运镜、画面关键状态 / 动作过程、台词与口型时间段、非说话嘴型控制、声音策略、音效、入点、出点 / 转场、素材参考和分镜出图提示词。不要另写简化版故事或简化版分镜。
+
+按剧情节奏、动作、对白和情绪变化智能拆镜：默认只使用 5 秒或 10 秒；总时长不能整除 5 秒时，最后一镜使用不足 5 秒的余数，不得为凑时长增加碎镜头。5 秒和余数镜头写“关键帧画面”，默认 1 张首帧；10 秒镜头写“首帧 A 画面、尾帧 B 画面”，默认 2 张。过程帧仅用于确实无法由首尾表达的变形、魔法、分阶段动作、复杂走位或关键反转；先在方案中写明原因，后续必须逐镜让用户明确确认，未确认即按两张执行。
 
 正式剧本和镜头表完成后，必须先展示二者并询问用户是否符合要求、是否要调整；收到明确确认后调用 `record_script_and_storyboard_approval` 写入 `creative-review.md`。没有这项确认，不得调用 `create_keyframe_plan`，更不得使用图片工具生成关键帧。
 
-随后按每镜的实际动作、镜头时长和叙事重要性创建 `keyframe-plan.md`：
-
-- `start_only`：静态构图、轻表情或很短的单一动作；只需首帧。
-- `start_end`：有明确位移、对象移动、镜头推进后的状态变化，或约 5—8 秒的镜头；需首帧和尾帧。
-- `start_middle_end`：分阶段动作、变形/魔法、复杂走位、重要转折或较长镜头；需首帧、过程帧、尾帧。
-
-先展示逐镜帧数与每帧用途，等待用户确认。收到确认后调用 `approve_keyframe_plan`；只有 `assert_keyframe_generation_allowed` 成功时才可生成关键帧。多帧的价值来自清晰的阶段差异和工具支持，不得用近似重复图凑数量；同一镜的图片应明确标注为首 / 过程 / 尾帧，便于交给图生视频工具。
+随后按导演版分镜创建 `keyframe-plan.md`：5 秒或余数镜头固定 `start_only`；10 秒镜头固定 `start_end`。只有要表现不可省略中间状态的 10 秒镜头才能提议 `start_middle_end`，且必须写 `exception_reason`。展示方案时，将每个三帧例外单独问清“是否保留过程帧”；调用 `approve_keyframe_plan` 时仅把用户明确同意的镜号写入 `approved_middle_shot_ids`。未列入该参数的例外自动降为两帧。只有 `assert_keyframe_generation_allowed` 成功时才可生成关键帧。多帧的价值来自清晰的阶段差异和工具支持，不得用近似重复图凑数量；同一镜的图片应明确标注为首 / 过程 / 尾帧，便于交给图生视频工具。
 
 关键帧执行阶段调用 `create_keyframe_execution_pack`。它从已确认分镜逐镜建立 `keyframe-execution.md`：保留时长、镜头语言、画面三阶段、台词、声音策略、音效、入点、出点 / 转场、按名称的素材参考和原分镜出图提示词；只新增 `KF<镜号>-start/middle/end.png` 文件以及对应帧图提示词，并合成可复制的视频生成提示词。不得把它降级为一句动作说明。详细字段见 [references/storyboard-to-keyframes.md](references/storyboard-to-keyframes.md)。
 

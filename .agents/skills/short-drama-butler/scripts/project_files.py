@@ -491,6 +491,17 @@ def record_script_and_storyboard_approval(project_root: Path, episode_id: str) -
     return review_path
 
 
+def recommend_keyframe_strategy(duration_seconds: float) -> str:
+    """Return the default keyframe strategy for a director-board shot duration."""
+    if duration_seconds <= 0:
+        raise ValueError("镜头时长必须为正数")
+    if duration_seconds <= 5:
+        return "start_only"
+    if duration_seconds == 10:
+        return "start_end"
+    raise ValueError("默认导演版分镜只使用 5 秒、10 秒或最后不足 5 秒的余数")
+
+
 def _validate_keyframe_shots(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not shots:
         raise ValueError("关键帧方案至少需要一个镜头")
@@ -513,6 +524,21 @@ def _validate_keyframe_shots(shots: list[dict[str, Any]]) -> list[dict[str, Any]
         if strategy not in KEYFRAME_STRATEGIES:
             choices = "、".join(KEYFRAME_STRATEGIES)
             raise ValueError(f"镜头 {shot_id} 的关键帧策略无效；可选：{choices}")
+        exception_reason = str(shot.get("exception_reason", "")).strip()
+        default_strategy = recommend_keyframe_strategy(duration_seconds)
+        if strategy == "start_middle_end":
+            if duration_seconds != 10:
+                raise ValueError(f"镜头 {shot_id} 的过程帧例外只适用于 10 秒镜头")
+            if not exception_reason:
+                raise ValueError(f"镜头 {shot_id} 需要过程帧时必须说明特殊原因")
+            middle_frame_status = "requires_explicit_user_confirmation"
+        elif strategy != default_strategy:
+            raise ValueError(
+                f"镜头 {shot_id} 默认应使用 {KEYFRAME_STRATEGIES[default_strategy][0]}；"
+                "过程帧仅可作为已说明原因的 10 秒例外"
+            )
+        else:
+            middle_frame_status = "not_requested"
         shot_ids.add(shot_id)
         label, frame_kinds = KEYFRAME_STRATEGIES[strategy]
         validated.append(
@@ -523,9 +549,48 @@ def _validate_keyframe_shots(shots: list[dict[str, Any]]) -> list[dict[str, Any]
                 "strategy": strategy,
                 "strategy_label": label,
                 "frames": frame_kinds,
+                "exception_reason": exception_reason,
+                "middle_frame_status": middle_frame_status,
             }
         )
     return validated
+
+
+def _render_keyframe_plan(episode_id: str, shots: list[dict[str, Any]], status: str) -> str:
+    total_frames = sum(len(shot["frames"]) for shot in shots)
+    rows = "\n".join(
+        f"| {shot['shot_id']} | {shot['duration_seconds']:g} 秒 | {len(shot['frames'])} 张（{shot['strategy_label']}） | {shot['action']} |"
+        for shot in shots
+    )
+    exception_rows = [
+        f"- 镜头 {shot['shot_id']}：{shot['exception_reason']}（{_middle_frame_status_label(shot['middle_frame_status'])}）"
+        for shot in shots
+        if shot.get("exception_reason")
+    ]
+    return (
+        f"# {episode_id} 关键帧方案\n\n"
+        f"- 状态：{status}\n"
+        f"- 镜头数：{len(shots)}\n"
+        f"- 计划关键帧总数：{total_frames}\n"
+        "- 前置条件：`formal-script.md` 与 `storyboard.md` 已获用户确认。\n"
+        "- 默认节奏：5 秒或最后不足 5 秒的余数使用 1 张首帧；10 秒使用首帧、尾帧 2 张。\n"
+        "- 过程帧例外：仅限有明确特殊原因的 10 秒镜头；只有用户逐镜明确确认后才保留第三张，否则确认方案时自动改回首帧、尾帧。\n"
+        "- 规则：确认本方案前不得生成关键帧；若要调整剧本、分镜或每镜帧数，先改本方案再确认。\n\n"
+        "| 镜号 | 时长 | 关键帧数量与类型 | 图生视频要表达的单一动作 |\n"
+        "| --- | ---: | --- | --- |\n"
+        f"{rows}\n\n"
+        "## 过程帧例外\n\n"
+        + ("\n".join(exception_rows) if exception_rows else "- 无；本方案全部采用默认帧数。")
+        + "\n"
+    )
+
+
+def _middle_frame_status_label(status: str) -> str:
+    return {
+        "requires_explicit_user_confirmation": "待逐镜确认",
+        "user_confirmed": "已逐镜确认",
+        "defaulted_to_two_frames": "未获逐镜确认，已按两帧执行",
+    }.get(status, "未申请过程帧")
 
 
 def create_keyframe_plan(project_root: Path, episode_id: str, shots: list[dict[str, Any]]) -> Path:
@@ -544,36 +609,19 @@ def create_keyframe_plan(project_root: Path, episode_id: str, shots: list[dict[s
     (episode_dir / "keyframe-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    total_frames = sum(len(shot["frames"]) for shot in validated_shots)
-    rows = "\n".join(
-        f"| {shot['shot_id']} | {shot['duration_seconds']:g} 秒 | {len(shot['frames'])} 张（{shot['strategy_label']}） | {shot['action']} |"
-        for shot in validated_shots
-    )
     plan_path = episode_dir / "keyframe-plan.md"
-    plan_path.write_text(
-        f"# {episode_id} 关键帧方案\n\n"
-        "- 状态：待用户确认\n"
-        f"- 镜头数：{len(validated_shots)}\n"
-        f"- 计划关键帧总数：{total_frames}\n"
-        "- 前置条件：`formal-script.md` 与 `storyboard.md` 已获用户确认。\n"
-        "- 规则：确认本方案前不得生成关键帧；若要调整剧本、分镜或每镜帧数，先改本方案再确认。\n\n"
-        "| 镜号 | 时长 | 关键帧数量与类型 | 图生视频要表达的单一动作 |\n"
-        "| --- | ---: | --- | --- |\n"
-        f"{rows}\n\n"
-        "## 如何选择帧数\n\n"
-        "- 首帧：静态构图、轻表情或很短的单一动作。\n"
-        "- 首帧、尾帧：角色/镜头有明确位移、物体移动、情绪明显变化，或镜头约 5—8 秒。\n"
-        "- 首帧、过程帧、尾帧：分阶段动作、变形/魔法、复杂走位、重要情节转折，或较长镜头。\n"
-        "- 超过三张只在每一张都代表清晰阶段、且所用图生视频工具支持多参考帧时采用；不要用近似重复图堆数量。\n",
-        encoding="utf-8",
-    )
+    plan_path.write_text(_render_keyframe_plan(episode_id, validated_shots, "待用户确认"), encoding="utf-8")
     state["keyframe_plan_status"] = "user_pending"
     state["keyframe_plan_path"] = "keyframe-plan.md"
     _write_episode_state(episode_dir, state)
     return plan_path
 
 
-def approve_keyframe_plan(project_root: Path, episode_id: str) -> Path:
+def approve_keyframe_plan(
+    project_root: Path,
+    episode_id: str,
+    approved_middle_shot_ids: list[str] | None = None,
+) -> Path:
     """Mark the current per-shot keyframe plan user-confirmed and ready for image production."""
     root = project_root.resolve()
     episode_dir = _episode_directory(root, episode_id)
@@ -584,12 +632,33 @@ def approve_keyframe_plan(project_root: Path, episode_id: str) -> Path:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("status") != "user_pending":
         raise ValueError("关键帧方案当前不能确认")
+    approved_ids = {str(shot_id).strip() for shot_id in (approved_middle_shot_ids or [])}
+    if "" in approved_ids:
+        raise ValueError("过程帧确认镜号不能为空")
+    proposed_ids = {
+        str(shot["shot_id"])
+        for shot in manifest.get("shots", [])
+        if shot.get("middle_frame_status") == "requires_explicit_user_confirmation"
+    }
+    unexpected_ids = approved_ids - proposed_ids
+    if unexpected_ids:
+        raise ValueError(f"未找到待确认过程帧镜头：{'、'.join(sorted(unexpected_ids))}")
+    for shot in manifest.get("shots", []):
+        if shot.get("middle_frame_status") != "requires_explicit_user_confirmation":
+            continue
+        if str(shot["shot_id"]) in approved_ids:
+            shot["middle_frame_status"] = "user_confirmed"
+            continue
+        label, frames = KEYFRAME_STRATEGIES["start_end"]
+        shot["strategy"] = "start_end"
+        shot["strategy_label"] = label
+        shot["frames"] = frames
+        shot["middle_frame_status"] = "defaulted_to_two_frames"
     approved_at = datetime.now(timezone.utc).isoformat()
     manifest["status"] = "user_confirmed"
     manifest["confirmed_at"] = approved_at
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    contents = plan_path.read_text(encoding="utf-8")
-    plan_path.write_text(contents.replace("- 状态：待用户确认", "- 状态：已确认", 1), encoding="utf-8")
+    plan_path.write_text(_render_keyframe_plan(episode_id, manifest.get("shots", []), "已确认"), encoding="utf-8")
     state = _read_episode_state(episode_dir)
     state["keyframe_plan_status"] = "user_confirmed"
     state["keyframe_plan_confirmed_at"] = approved_at
@@ -703,7 +772,7 @@ def create_keyframe_execution_pack(
         "",
         "本文件逐镜继承已确认分镜的时长、画面、台词、声音、转场与提示词；只额外补关键帧文件和每张帧图提示词。它不是新的剧本或简化版分镜。",
         "",
-        "- 前置确认：正式剧本、分镜表和关键帧方案均已获用户确认。",
+        "- 前置确认：正式剧本、导演版分镜和关键帧方案均已获用户确认。",
         f"- 画幅：{frame_format}",
         "- 图生视频规则：每镜只执行本镜动作；对白是否在视频内生成由“声音策略”决定。",
         "",
@@ -1113,7 +1182,11 @@ def create_episode(
         "## 交给 Storyboard Generator 的任务\n\n"
         + (f"使用 `${configured_skill}`" if configured_skill else "使用项目指定的分镜 Skill")
         + f" 阅读本文件与 {context_list}，先输出故事梗概、人物小传和本集大纲，等待确认后再写 `formal-script.md` 和 `storyboard.md`。"
-        "正式剧本使用场次、镜头动作和角色对白；分镜表逐镜必须保留：镜号、预估时长、景别、镜头运动、画面内容、台词 / 声音策略 / 入点 / 出点、资产参考、分镜出图提示词。"
+        "正式剧本使用场次、镜头动作和角色对白；`storyboard.md` 必须使用导演版逐镜说明，不能用 Markdown 表格替代正文。"
+        "按剧情节奏、动作、对白和情绪变化智能拆镜：默认只使用 5 秒或 10 秒；总时长无法凑整时，最后一镜使用不足 5 秒的余数，禁止为凑时长添加无意义碎镜头。"
+        "5 秒镜头写“关键帧画面”，默认只需一张首帧；10 秒镜头写“首帧 A 画面、尾帧 B 画面”，10 秒镜头默认首帧与尾帧两张。"
+        "过程帧只可作为有明确特殊原因的 10 秒例外；先在关键帧方案写明原因并逐镜等待用户确认，未获明确确认时按两张执行。"
+        "每镜必须保留：镜号、时长、景别、运镜、画面关键状态 / 动作过程、台词与口型时间段、非说话嘴型控制、声音策略、音效、入点、出点 / 转场、素材参考和分镜出图提示词。"
         "不得把分镜压缩成只有动作的一句提示。用户确认剧本和分镜后，短剧管家才会从该分镜逐镜生成关键帧执行单；执行单继承全部分镜字段，只额外增加首 / 过程 / 尾帧文件与各帧出图提示词。"
         "必须遵守上方交接优先级，不得套用冲突的默认规则。\n"
     )

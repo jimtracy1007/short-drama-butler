@@ -30,6 +30,7 @@ from project_files import (  # noqa: E402
     initialize_project,
     register_asset,
     register_project_asset,
+    recommend_keyframe_strategy,
     record_episode_continuity,
     provide_episode_asset_image,
     provide_episode_asset_images,
@@ -144,7 +145,8 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertIn("fixed-settings-source.txt", contents)
             self.assertIn("formal-script.md", contents)
             self.assertIn("storyboard.md", contents)
-            self.assertIn("台词 / 声音策略 / 入点 / 出点", contents)
+            self.assertIn("台词与口型时间段", contents)
+            self.assertIn("非说话嘴型控制", contents)
             self.assertEqual((root / "project-settings/fixed-settings-source.txt").read_text(encoding="utf-8"), "旧设定文本\n")
 
     def test_asset_index_groups_multiple_views_under_one_asset_id(self) -> None:
@@ -174,8 +176,14 @@ class AssetMigrationTests(unittest.TestCase):
                     "EP001",
                     [
                         {"shot_id": "01", "duration_seconds": 4, "action": "咕噜看向海面", "strategy": "start_only"},
-                        {"shot_id": "02", "duration_seconds": 7, "action": "小螃蟹沿水道回海", "strategy": "start_end"},
-                        {"shot_id": "03", "duration_seconds": 8, "action": "水道从沙坑连到大海", "strategy": "start_middle_end"},
+                        {"shot_id": "02", "duration_seconds": 10, "action": "小螃蟹沿水道回海", "strategy": "start_end"},
+                        {
+                            "shot_id": "03",
+                            "duration_seconds": 10,
+                            "action": "水道从沙坑连到大海",
+                            "strategy": "start_middle_end",
+                            "exception_reason": "水流成形、连通大海和角色反应需要三个清晰阶段",
+                        },
                     ],
                 )
 
@@ -185,20 +193,90 @@ class AssetMigrationTests(unittest.TestCase):
                 "EP001",
                 [
                     {"shot_id": "01", "duration_seconds": 4, "action": "咕噜看向海面", "strategy": "start_only"},
-                    {"shot_id": "02", "duration_seconds": 7, "action": "小螃蟹沿水道回海", "strategy": "start_end"},
-                    {"shot_id": "03", "duration_seconds": 8, "action": "水道从沙坑连到大海", "strategy": "start_middle_end"},
+                    {"shot_id": "02", "duration_seconds": 10, "action": "小螃蟹沿水道回海", "strategy": "start_end"},
+                    {
+                        "shot_id": "03",
+                        "duration_seconds": 10,
+                        "action": "水道从沙坑连到大海",
+                        "strategy": "start_middle_end",
+                        "exception_reason": "水流成形、连通大海和角色反应需要三个清晰阶段",
+                    },
                 ],
             )
             contents = plan_path.read_text(encoding="utf-8")
             self.assertIn("状态：待用户确认", contents)
             self.assertIn("| 01 | 4 秒 | 1 张（首帧）", contents)
-            self.assertIn("| 02 | 7 秒 | 2 张（首帧、尾帧）", contents)
-            self.assertIn("| 03 | 8 秒 | 3 张（首帧、过程帧、尾帧）", contents)
+            self.assertIn("| 02 | 10 秒 | 2 张（首帧、尾帧）", contents)
+            self.assertIn("| 03 | 10 秒 | 3 张（首帧、过程帧、尾帧）", contents)
+            self.assertIn("待逐镜确认", contents)
             with self.assertRaisesRegex(ValueError, "关键帧方案"):
                 assert_keyframe_generation_allowed(root, "EP001")
 
             approve_keyframe_plan(root, "EP001")
             self.assertTrue(assert_keyframe_generation_allowed(root, "EP001"))
+
+    def test_keyframe_timing_defaults_and_middle_frame_exception_require_explicit_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None, frame_format="16:9", episode_target_seconds=120)
+            create_episode(root, "EP001", "魔法测试", "测试关键帧节奏。", [])
+            episode_dir = root / "episodes/EP001_魔法测试"
+            (episode_dir / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
+            (episode_dir / "storyboard.md").write_text("# 导演版分镜\n", encoding="utf-8")
+            record_script_and_storyboard_approval(root, "EP001")
+
+            self.assertEqual(recommend_keyframe_strategy(3), "start_only")
+            self.assertEqual(recommend_keyframe_strategy(5), "start_only")
+            self.assertEqual(recommend_keyframe_strategy(10), "start_end")
+            with self.assertRaisesRegex(ValueError, "5 秒、10 秒"):
+                recommend_keyframe_strategy(7)
+
+            with self.assertRaisesRegex(ValueError, "特殊原因"):
+                create_keyframe_plan(
+                    root,
+                    "EP001",
+                    [{"shot_id": "02", "duration_seconds": 10, "action": "魔法变形", "strategy": "start_middle_end"}],
+                )
+
+            plan = create_keyframe_plan(
+                root,
+                "EP001",
+                [
+                    {"shot_id": "01", "duration_seconds": 5, "action": "主角回头", "strategy": "start_only"},
+                    {
+                        "shot_id": "02",
+                        "duration_seconds": 10,
+                        "action": "魔法泡泡分三阶段变形",
+                        "strategy": "start_middle_end",
+                        "exception_reason": "中间状态决定变形是否连贯",
+                    },
+                ],
+            )
+            self.assertIn("待逐镜确认", plan.read_text(encoding="utf-8"))
+
+            approve_keyframe_plan(root, "EP001")
+            manifest = json.loads((episode_dir / "keyframe-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["shots"][1]["strategy"], "start_end")
+            self.assertEqual(manifest["shots"][1]["frames"], ["start", "end"])
+            self.assertEqual(manifest["shots"][1]["middle_frame_status"], "defaulted_to_two_frames")
+
+            create_keyframe_plan(
+                root,
+                "EP001",
+                [
+                    {
+                        "shot_id": "02",
+                        "duration_seconds": 10,
+                        "action": "魔法泡泡分三阶段变形",
+                        "strategy": "start_middle_end",
+                        "exception_reason": "中间状态决定变形是否连贯",
+                    }
+                ],
+            )
+            approve_keyframe_plan(root, "EP001", approved_middle_shot_ids=["02"])
+            manifest = json.loads((episode_dir / "keyframe-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["shots"][0]["frames"], ["start", "middle", "end"])
+            self.assertEqual(manifest["shots"][0]["middle_frame_status"], "user_confirmed")
 
     def test_keyframe_execution_pack_preserves_storyboard_fields_and_adds_frame_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -212,7 +290,7 @@ class AssetMigrationTests(unittest.TestCase):
             create_keyframe_plan(
                 root,
                 "EP001",
-                [{"shot_id": "02", "duration_seconds": 7, "action": "小螃蟹沿水道回海", "strategy": "start_end"}],
+                [{"shot_id": "02", "duration_seconds": 10, "action": "小螃蟹沿水道回海", "strategy": "start_end"}],
             )
             approve_keyframe_plan(root, "EP001")
 
@@ -244,14 +322,14 @@ class AssetMigrationTests(unittest.TestCase):
             )
 
             contents = execution_path.read_text(encoding="utf-8")
-            self.assertIn("- 时长：7 秒", contents)
+            self.assertIn("- 时长：10 秒", contents)
             self.assertIn("- 台词：咕噜（画外音）：慢慢走，我陪你走。", contents)
             self.assertIn("- 声音策略：后期配音，不要求视频生成口型", contents)
             self.assertIn("- 入点：承接上一镜水道刚被注满的水流声", contents)
             self.assertIn("- 出点 / 转场：小螃蟹回头的视线切至浅海挥钳镜头", contents)
             self.assertIn("KF02-start.png", contents)
             self.assertIn("KF02-end.png", contents)
-            self.assertIn("7 秒，16:9，低机位中景，缓慢跟拍", contents)
+            self.assertIn("10 秒，16:9，低机位中景，缓慢跟拍", contents)
 
     def test_handoff_explicitly_overrides_storyboard_generator_short_form_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -263,7 +341,26 @@ class AssetMigrationTests(unittest.TestCase):
         self.assertIn("21:9", package)
         self.assertIn("75 秒", package)
         self.assertIn("最高优先级", package)
+        self.assertIn("导演版逐镜说明", package)
+        self.assertIn("5 秒或 10 秒", package)
+        self.assertIn("10 秒镜头默认首帧与尾帧", package)
+        self.assertNotIn("分镜表逐镜必须", package)
         self.assertNotIn("fixed-settings-source.txt", package)
+
+    def test_storyboard_integration_protocol_uses_director_board_instead_of_legacy_table_template(self) -> None:
+        protocol = (
+            Path(__file__).parents[1]
+            / ".agents"
+            / "skills"
+            / "short-drama-butler"
+            / "references"
+            / "seedance-integration-protocol.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("导演版逐镜说明", protocol)
+        self.assertIn("首帧 A 画面", protocol)
+        self.assertIn("10 秒默认 2 张", protocol)
+        self.assertNotIn("分镜表逐镜必须", protocol)
 
     def test_docx_extractor_preserves_chinese_paragraphs_without_external_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

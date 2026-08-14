@@ -12,7 +12,7 @@
 
 - Default director-board durations are 5 seconds or 10 seconds; only a final 1–4-second remainder is allowed.
 - 5 seconds and remainders use `start_only`; 10 seconds uses `start_end`.
-- `start_middle_end` needs a non-empty, user-visible `exception_reason`; it cannot reach execution until the ordinary keyframe-plan approval gate completes.
+- `start_middle_end` needs a non-empty, user-visible `exception_reason`; it remains three frames only when `approve_keyframe_plan(..., approved_middle_shot_ids=[...])` explicitly includes that shot, otherwise it becomes two frames.
 - No third-party dependencies, video APIs, automatic video generation, or image uploads.
 - Director-board prose is the default `storyboard.md`; Markdown tables cannot replace it.
 
@@ -26,7 +26,7 @@
 
 **Interfaces:**
 - Produces: `recommend_keyframe_strategy(duration_seconds: float) -> str`.
-- Produces: `_validate_keyframe_shots(shots: list[dict[str, Any]]) -> list[dict[str, Any]]`, with optional `exception_reason` on three-frame entries.
+- Produces: `_validate_keyframe_shots(shots: list[dict[str, Any]]) -> list[dict[str, Any]]`, with required `exception_reason` on three-frame entries.
 - Consumes: existing `create_keyframe_plan(project_root, episode_id, shots)` and existing approval gates.
 
 - [ ] **Step 1: Write the failing test**
@@ -60,7 +60,7 @@ def recommend_keyframe_strategy(duration_seconds: float) -> str:
     raise ValueError("默认导演版分镜只使用 5 秒、10 秒或最后不足 5 秒的余数")
 ```
 
-Validate supplied strategies against that default. For `start_middle_end`, require a 10-second duration and non-empty `exception_reason`. Persist the reason in `keyframe-manifest.json` and render it in `keyframe-plan.md` as “待用户确认的例外原因”.
+Validate supplied strategies against that default. For `start_middle_end`, require a 10-second duration and non-empty `exception_reason`. Persist the reason in `keyframe-manifest.json`, render it in `keyframe-plan.md` as “待逐镜确认”, and downgrade it to two frames unless the approval call explicitly includes its shot ID.
 
 - [ ] **Step 4: Run focused tests and commit**
 
@@ -188,4 +188,3 @@ git diff --check HEAD
 ```
 
 Expected: no legacy default recipe matches; only intended Markdown, Python, test and plan files are staged; whitespace is clean.
-
