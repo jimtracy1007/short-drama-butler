@@ -9,7 +9,7 @@ import zipfile
 from pathlib import Path
 
 
-SKILL_SCRIPTS = Path(__file__).parents[1] / ".agents" / "skills" / "short-drama-butler" / "scripts"
+SKILL_SCRIPTS = Path(__file__).parents[1] / "short-drama-butler" / "scripts"
 sys.path.insert(0, str(SKILL_SCRIPTS))
 
 from asset_migration import (  # noqa: E402
@@ -611,8 +611,6 @@ class AssetMigrationTests(unittest.TestCase):
     def test_storyboard_integration_protocol_uses_director_board_instead_of_legacy_table_template(self) -> None:
         protocol = (
             Path(__file__).parents[1]
-            / ".agents"
-            / "skills"
             / "short-drama-butler"
             / "references"
             / "seedance-integration-protocol.md"
@@ -631,8 +629,6 @@ class AssetMigrationTests(unittest.TestCase):
 
         butler_skill = (
             Path(__file__).parents[1]
-            / ".agents"
-            / "skills"
             / "short-drama-butler"
             / "SKILL.md"
         ).read_text(encoding="utf-8")
@@ -874,7 +870,7 @@ class AssetMigrationTests(unittest.TestCase):
         repository_root = Path(__file__).parents[1]
         readme = (repository_root / "README.md").read_text(encoding="utf-8")
         project_files = (
-            repository_root / ".agents/skills/short-drama-butler/references/project-files.md"
+            repository_root / "short-drama-butler/references/project-files.md"
         ).read_text(encoding="utf-8")
         todo = (repository_root / "TODO.md").read_text(encoding="utf-8")
 

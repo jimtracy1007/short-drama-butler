@@ -220,7 +220,7 @@ $short-drama-butler
 
 ## 每个文件是做什么的
 
-你平时无需手动编辑这些文件；它们是短剧管家和分镜 Skill 的共同记忆。完整说明见 [项目文件参考](.agents/skills/short-drama-butler/references/project-files.md)。
+你平时无需手动编辑这些文件；它们是短剧管家和分镜 Skill 的共同记忆。完整说明见 [项目文件参考](short-drama-butler/references/project-files.md)。
 
 ```text
 project-settings/                 项目级、不随单集变化的记忆
@@ -263,7 +263,7 @@ $seedance-storyboard-generator
 
 新对话中才需要告诉它交接包路径。它会先给大纲；确认大纲并处理完必要的新资产后，再写正式剧本和镜头表。
 
-短剧管家首次使用时会自动检测同级 `seedance-storyboard-generator`；缺失时只下载固定版本、校验过的 Skill 子目录，不覆盖已有安装。详情见[交接优先协议](.agents/skills/short-drama-butler/references/seedance-integration-protocol.md)。
+短剧管家首次使用时会自动检测同级 `seedance-storyboard-generator`；缺失时只下载固定版本、校验过的 Skill 子目录，不覆盖已有安装。详情见[交接优先协议](short-drama-butler/references/seedance-integration-protocol.md)。
 
 ## 常见问题
 

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 
-SKILL_SCRIPTS = Path(__file__).parents[1] / ".agents" / "skills" / "short-drama-butler" / "scripts"
+SKILL_SCRIPTS = Path(__file__).parents[1] / "short-drama-butler" / "scripts"
 sys.path.insert(0, str(SKILL_SCRIPTS))
 
 from keyframe_consistency import (  # noqa: E402
