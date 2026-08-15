@@ -28,6 +28,12 @@ from project_files import (  # noqa: E402
     create_keyframe_execution_pack,
     create_keyframe_plan,
     initialize_project,
+    prepare_keyframe_generation,
+    record_stage_generation,
+    record_stage_qa,
+    register_user_override,
+    record_reference_board,
+    approve_reference_board,
     register_asset,
     register_project_asset,
     recommend_keyframe_strategy,
@@ -282,6 +288,15 @@ class AssetMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             initialize_project(root, "测试项目", None, frame_format="16:9", episode_target_seconds=120)
+            self.write_file(root, "assets/global/characters/C01_crab/front.png", b"crab")
+            self.write_file(root, "assets/global/scenes/S01_beach/front.png", b"beach")
+            write_asset_index(
+                root,
+                [
+                    {"asset_id": "C01", "name": "小螃蟹", "kind": "characters", "scope": "global", "destination": "assets/global/characters/C01_crab/front.png", "views": [{"variant": "front", "path": "assets/global/characters/C01_crab/front.png"}]},
+                    {"asset_id": "S01", "name": "泡泡湾海滩", "kind": "scenes", "scope": "global", "destination": "assets/global/scenes/S01_beach/front.png", "views": [{"variant": "front", "path": "assets/global/scenes/S01_beach/front.png"}]},
+                ],
+            )
             create_episode(root, "EP001", "海边新朋友", "咕噜帮助小螃蟹回海。", [])
             episode_dir = root / "episodes/EP001_海边新朋友"
             (episode_dir / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
@@ -304,6 +319,10 @@ class AssetMigrationTests(unittest.TestCase):
                         "camera_movement": "缓慢跟拍",
                         "scene": "泡泡湾海滩水道",
                         "asset_references": ["小螃蟹", "泡泡湾海滩"],
+                        "asset_uses": [
+                            {"reference": "小螃蟹", "role": "character_identity", "required": True},
+                            {"reference": "泡泡湾海滩", "role": "background", "required": True},
+                        ],
                         "start_state": "小螃蟹抱住小贝壳，站在水道起点",
                         "motion": "横着走三步，水面泛起细小涟漪",
                         "end_state": "小螃蟹靠近浅海并回头",
@@ -317,6 +336,10 @@ class AssetMigrationTests(unittest.TestCase):
                             "start": "软萌3D儿童动画，低机位中景，小螃蟹抱住小贝壳站在水道起点。",
                             "end": "软萌3D儿童动画，低机位中景，小螃蟹抱住小贝壳靠近浅海并回头。",
                         },
+                        "frame_specs": {
+                            "start": {"continuity_contract": None, "allowed_changes": ["建立水道"], "invariants": ["小螃蟹身份"]},
+                            "end": {"continuity_contract": {"predecessor": {"shot_id": "02", "frame_kind": "start"}, "inherit_dimensions": ["space", "character_identity"], "asset_ids": ["C01", "S01"]}},
+                        },
                     }
                 ],
             )
@@ -327,9 +350,115 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertIn("- 声音策略：后期配音，不要求视频生成口型", contents)
             self.assertIn("- 入点：承接上一镜水道刚被注满的水流声", contents)
             self.assertIn("- 出点 / 转场：小螃蟹回头的视线切至浅海挥钳镜头", contents)
-            self.assertIn("KF02-start.png", contents)
-            self.assertIn("KF02-end.png", contents)
+            self.assertIn("| start | `待确认`", contents)
+            self.assertIn("| end | `待确认`", contents)
             self.assertIn("10 秒，16:9，低机位中景，缓慢跟拍", contents)
+            manifest = json.loads((episode_dir / "keyframe-execution-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["shots"][0]["frames"][1]["status"], "waiting_for_dependency")
+
+    def test_v2_generation_waits_for_dependency_and_records_qa_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None)
+            self.write_file(root, "assets/S01.png", b"beach")
+            write_asset_index(root, [{"asset_id": "S01", "name": "海滩", "kind": "scenes", "scope": "global", "destination": "assets/S01.png", "views": [{"variant": "front", "path": "assets/S01.png"}]}])
+            create_episode(root, "EP001", "测试集", "测试", [])
+            episode = root / "episodes/EP001_测试集"
+            (episode / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
+            (episode / "storyboard.md").write_text("# 分镜\n", encoding="utf-8")
+            record_script_and_storyboard_approval(root, "EP001")
+            create_keyframe_plan(root, "EP001", [{"shot_id": "01", "duration_seconds": 10, "action": "海浪靠岸", "strategy": "start_end"}])
+            approve_keyframe_plan(root, "EP001")
+            create_keyframe_execution_pack(
+                root, "EP001", [{
+                    "shot_id": "01", "shot_size": "全景", "camera_movement": "固定", "scene": "海滩", "asset_references": ["海滩"],
+                    "asset_uses": [{"reference": "海滩", "role": "background", "required": True}],
+                    "start_state": "海浪靠岸", "motion": "浪花推进", "end_state": "浪花退去", "dialogue": "无", "voice_strategy": "后期配音", "sound_effects": "海浪", "transition_in": "淡入", "transition_out": "淡出", "storyboard_image_prompt": "明亮海滩",
+                    "frame_prompts": {"start": "海浪靠岸", "end": "浪花退去"},
+                    "frame_specs": {"start": {"continuity_contract": None}, "end": {"continuity_contract": {"predecessor": {"shot_id": "01", "frame_kind": "start"}, "inherit_dimensions": ["space"], "asset_ids": ["S01"]}}},
+                }],
+            )
+            waiting = prepare_keyframe_generation(root, "EP001", "01", "end")
+            self.assertEqual(waiting["status"], "waiting_for_dependency")
+            start_plan = prepare_keyframe_generation(root, "EP001", "01", "start")
+            stage = start_plan["stages"][0]
+            self.write_file(root, "provider/start.png", b"start-result")
+            generation = record_stage_generation(root, "EP001", start_plan["plan_id"], stage["stage_id"], {
+                "plan_id": start_plan["plan_id"], "stage_id": stage["stage_id"], "tool_request_id": "req-start", "prompt": "海浪靠岸", "input_images": stage["input_images"], "output_path": "provider/start.png", "started_at": "2026-08-15T00:00:00Z", "completed_at": "2026-08-15T00:01:00Z",
+            })
+            self.assertTrue(generation["path"].startswith("episodes/EP001_测试集/keyframes/work/KF01-start/r001-"))
+            record_stage_qa(root, "EP001", start_plan["plan_id"], stage["stage_id"], {
+                "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:02:00Z", "checks": [{"category": "scene", "status": "pass", "confidence": 0.9, "evidence_paths": []}], "issues": [],
+            })
+            end_plan = prepare_keyframe_generation(root, "EP001", "01", "end")
+            self.assertEqual(end_plan["status"], "planned")
+            end_stage = end_plan["stages"][0]
+            self.assertEqual(end_stage["input_images"][0]["role"], "edit_target")
+            self.write_file(root, "provider/end.png", b"end-result")
+            record_stage_generation(root, "EP001", end_plan["plan_id"], end_stage["stage_id"], {
+                "plan_id": end_plan["plan_id"], "stage_id": end_stage["stage_id"], "tool_request_id": "req-end", "prompt": "浪花退去", "input_images": end_stage["input_images"], "output_path": "provider/end.png", "started_at": "2026-08-15T00:03:00Z", "completed_at": "2026-08-15T00:04:00Z",
+            })
+            record_stage_qa(root, "EP001", end_plan["plan_id"], end_stage["stage_id"], {
+                "status": "uncertain", "reviewer_type": "automated", "checked_at": "2026-08-15T00:05:00Z", "checks": [{"category": "continuity", "status": "uncertain", "confidence": 0.6, "evidence_paths": []}], "issues": [],
+            })
+            confirmed = record_stage_qa(root, "EP001", end_plan["plan_id"], end_stage["stage_id"], {
+                "status": "pass", "reviewer_type": "user", "checked_at": "2026-08-15T00:06:00Z", "checks": [{"category": "continuity", "status": "pass", "confidence": 1.0, "evidence_paths": []}], "issues": [],
+            })
+            self.assertEqual(confirmed["status"], "qa_passed")
+            manifest = json.loads((episode / "keyframe-execution-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["shots"][0]["frames"][1]["status"], "confirmed")
+            self.assertTrue((root / manifest["shots"][0]["frames"][1]["confirmed_revision"]["path"]).is_file())
+            self.write_file(root, "uploads/beach.png", b"user-beach")
+            override = register_user_override(root, "EP001", {"path": "uploads/beach.png", "role": "background", "scope": "shot", "scope_ids": ["01"]})
+            self.assertTrue((root / override["path"]).is_file())
+            self.assertEqual(override["role"], "background")
+
+    def test_v2_reference_board_requires_registration_and_user_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None)
+            assets = []
+            uses = []
+            members = []
+            for number in range(1, 7):
+                path = self.write_file(root, f"assets/C{number:02d}.png", f"C{number}".encode())
+                asset_id = f"C{number:02d}"
+                assets.append({"asset_id": asset_id, "name": asset_id, "kind": "characters", "scope": "global", "destination": path.relative_to(root).as_posix(), "views": [{"variant": "front", "path": path.relative_to(root).as_posix()}]})
+                uses.append({"reference": asset_id, "role": "character_identity", "required": True, "relationship_group": "hold-hands"})
+                members.append({"asset_id": asset_id, "path": path.relative_to(root).as_posix(), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+            write_asset_index(root, assets)
+            create_episode(root, "EP001", "群像", "测试", [])
+            episode = root / "episodes/EP001_群像"
+            (episode / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
+            (episode / "storyboard.md").write_text("# 分镜\n", encoding="utf-8")
+            record_script_and_storyboard_approval(root, "EP001")
+            create_keyframe_plan(root, "EP001", [{"shot_id": "01", "duration_seconds": 5, "action": "大家牵手", "strategy": "start_only"}])
+            approve_keyframe_plan(root, "EP001")
+            create_keyframe_execution_pack(root, "EP001", [{
+                "shot_id": "01", "shot_size": "全景", "camera_movement": "固定", "scene": "广场", "asset_references": [item["reference"] for item in uses], "asset_uses": uses,
+                "start_state": "牵手", "motion": "微笑", "end_state": "牵手", "dialogue": "无", "voice_strategy": "后期", "sound_effects": "无", "transition_in": "切入", "transition_out": "切出", "storyboard_image_prompt": "群像", "frame_prompts": {"start": "群像"}, "frame_specs": {"start": {"continuity_contract": None}},
+            }])
+            needed = prepare_keyframe_generation(root, "EP001", "01", "start")
+            self.assertEqual(needed["status"], "reference_board_required")
+            self.write_file(root, "provider/board.png", b"board")
+            board = record_reference_board(root, "EP001", {"plan_id": needed["plan_id"], "relationship_group": "hold-hands", "output_path": "provider/board.png", "members": members, "layout": "grid", "low_resolution_risk": True})
+            self.assertFalse(board["approved"])
+            approved = approve_reference_board(root, "EP001", board["board_id"])
+            self.assertTrue(approved["approved"])
+            self.assertEqual(prepare_keyframe_generation(root, "EP001", "01", "start")["status"], "planned")
+
+    def test_legacy_execution_manifest_is_marked_and_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None)
+            create_episode(root, "EP001", "旧版", "测试", [])
+            episode = root / "episodes/EP001_旧版"
+            (episode / "keyframe-execution-manifest.json").write_text(json.dumps({"episode_id": "EP001", "status": "ready", "shots": []}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "legacy_unplanned"):
+                prepare_keyframe_generation(root, "EP001", "01", "start")
+            marked = json.loads((episode / "keyframe-execution-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(marked["status"], "legacy_unplanned")
 
     def test_handoff_explicitly_overrides_storyboard_generator_short_form_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

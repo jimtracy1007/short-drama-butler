@@ -6,12 +6,22 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from asset_migration import build_plan, execute_plan, rollback
 from extract_docx_text import extract_text
+from keyframe_consistency import (
+    ASSET_ROLES,
+    MAX_INPUT_IMAGES,
+    KeyframeConsistencyError,
+    build_generation_plan,
+    resolve_applicable_overrides,
+    resolve_keyframe_asset_uses,
+    validate_continuity_contract,
+)
 
 
 KIND_PREFIXES = {"characters": "C", "scenes": "S", "props": "P"}
@@ -692,6 +702,97 @@ KEYFRAME_EXECUTION_FIELDS = (
     "storyboard_image_prompt",
 )
 
+QA_CATEGORIES = {"character", "scene", "prop", "continuity"}
+
+
+def _manifest_path(episode_dir: Path) -> Path:
+    return episode_dir / "keyframe-execution-manifest.json"
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _project_image(root: Path, value: object, field: str) -> tuple[Path, str]:
+    """Return an existing, project-local image path without allowing escape."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field}必须是项目内图片路径")
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"{field}必须是项目内相对路径：{value}")
+    candidate = (root / relative).resolve()
+    try:
+        relative_path = candidate.relative_to(root).as_posix()
+    except ValueError as error:
+        raise ValueError(f"{field}逃出项目根目录：{value}") from error
+    if not candidate.is_file():
+        raise FileNotFoundError(f"找不到{field}：{relative_path}")
+    return candidate, relative_path
+
+
+def _write_json(path: Path, value: dict[str, Any]) -> None:
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _read_v2_manifest(episode_dir: Path) -> dict[str, Any]:
+    path = _manifest_path(episode_dir)
+    if not path.is_file():
+        raise FileNotFoundError("本集尚未创建关键帧执行单")
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version", 0) >= 2:
+        return manifest
+    # A legacy pack is intentionally not inferred or silently upgraded.  The
+    # marker makes the block visible while preserving the original shot data.
+    manifest["status"] = "legacy_unplanned"
+    _write_json(path, manifest)
+    raise ValueError("旧版关键帧执行单已标为 legacy_unplanned；请从已确认分镜重新创建 v2 执行单")
+
+
+def _frame_key(shot_id: str, frame_kind: str) -> str:
+    return f"KF{shot_id}-{frame_kind}"
+
+
+def _find_shot(manifest: dict[str, Any], shot_id: str) -> dict[str, Any]:
+    for shot in manifest.get("shots", []):
+        if shot.get("shot_id") == shot_id:
+            return shot
+    raise ValueError(f"执行单不存在镜头：{shot_id}")
+
+
+def _find_frame(manifest: dict[str, Any], shot_id: str, frame_kind: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    shot = _find_shot(manifest, shot_id)
+    for frame in shot.get("frames", []):
+        if frame.get("frame_kind") == frame_kind:
+            return shot, frame
+    raise ValueError(f"镜头 {shot_id} 不存在 {frame_kind} 帧")
+
+
+def _find_plan(manifest: dict[str, Any], plan_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    for shot in manifest.get("shots", []):
+        for frame in shot.get("frames", []):
+            for plan in frame.get("plans", []):
+                if plan.get("plan_id") == plan_id:
+                    return shot, frame, plan
+    raise ValueError(f"执行单不存在计划：{plan_id}")
+
+
+def _stage(plan: dict[str, Any], stage_id: str) -> dict[str, Any]:
+    for stage in plan.get("stages", []):
+        if stage.get("stage_id") == stage_id:
+            return stage
+    raise ValueError(f"计划 {plan.get('plan_id')} 不存在阶段：{stage_id}")
+
+
+def _next_revision(parent: Path, suffix: str) -> tuple[str, Path]:
+    parent.mkdir(parents=True, exist_ok=True)
+    index = 1
+    while True:
+        revision = f"r{index:03d}"
+        candidate = parent / f"{revision}{suffix}"
+        if not candidate.exists():
+            return revision, candidate
+        index += 1
+
 
 def _keyframe_filename(shot_id: str, frame_kind: str) -> str:
     """Name a generated frame by its source storyboard shot and narrative position."""
@@ -726,12 +827,44 @@ def _validate_execution_details(
         references = detail.get("asset_references", [])
         if not isinstance(references, list) or not all(str(reference).strip() for reference in references):
             raise ValueError(f"镜头 {shot_id} 需要至少一个按名称说明的素材参考")
+        asset_uses = detail.get("asset_uses")
+        if not isinstance(asset_uses, list) or not asset_uses:
+            raise ValueError(f"镜头 {shot_id} 必须提供结构化 asset_uses")
+        for asset_use in asset_uses:
+            if not isinstance(asset_use, dict) or not isinstance(asset_use.get("reference"), str) or not asset_use["reference"].strip():
+                raise ValueError(f"镜头 {shot_id} 的 asset_uses 每项都需要 reference")
+            if asset_use.get("role") not in ASSET_ROLES:
+                raise ValueError(f"镜头 {shot_id} 的 asset_uses 角色不合法")
+            if not isinstance(asset_use.get("required"), bool):
+                raise ValueError(f"镜头 {shot_id} 的 asset_uses 每项都需要布尔 required")
         frame_prompts = detail.get("frame_prompts", {})
         if not isinstance(frame_prompts, dict) or set(frame_prompts) != set(planned["frames"]):
             expected = "、".join(planned["frames"])
             raise ValueError(f"镜头 {shot_id} 的关键帧提示词必须恰好包含：{expected}")
         if any(not str(prompt).strip() for prompt in frame_prompts.values()):
             raise ValueError(f"镜头 {shot_id} 的关键帧提示词不能为空")
+        frame_specs = detail.get("frame_specs")
+        if not isinstance(frame_specs, dict) or set(frame_specs) != set(planned["frames"]):
+            expected = "、".join(planned["frames"])
+            raise ValueError(f"镜头 {shot_id} 的 frame_specs 必须恰好包含：{expected}")
+        normalized_specs: dict[str, dict[str, Any]] = {}
+        for frame_kind in planned["frames"]:
+            raw_spec = frame_specs[frame_kind]
+            if not isinstance(raw_spec, dict):
+                raise ValueError(f"镜头 {shot_id} 的 {frame_kind} frame_spec 必须是对象")
+            try:
+                contract = validate_continuity_contract(raw_spec)
+            except KeyframeConsistencyError as error:
+                raise ValueError(f"镜头 {shot_id} 的 {frame_kind} frame_spec 无效：{error}") from error
+            for list_field in ("allowed_changes", "invariants"):
+                if list_field in raw_spec and (not isinstance(raw_spec[list_field], list) or not all(isinstance(value, str) and value.strip() for value in raw_spec[list_field])):
+                    raise ValueError(f"镜头 {shot_id} 的 {frame_kind} {list_field} 必须是非空文本列表")
+            normalized_specs[frame_kind] = {
+                "prompt": str(frame_prompts[frame_kind]).strip(),
+                "allowed_changes": list(raw_spec.get("allowed_changes", [])),
+                "invariants": list(raw_spec.get("invariants", [])),
+                "continuity_contract": contract,
+            }
         validated.append(
             {
                 "shot_id": shot_id,
@@ -741,57 +874,43 @@ def _validate_execution_details(
                 "frames": planned["frames"],
                 "action": planned["action"],
                 "asset_references": [str(reference).strip() for reference in references],
+                "asset_uses": [dict(asset_use) for asset_use in asset_uses],
                 **{field: str(detail[field]).strip() for field in KEYFRAME_EXECUTION_FIELDS},
                 "frame_prompts": {frame: str(frame_prompts[frame]).strip() for frame in planned["frames"]},
+                "frame_specs": normalized_specs,
             }
         )
     return validated
 
 
-def create_keyframe_execution_pack(
-    project_root: Path,
-    episode_id: str,
-    shot_details: list[dict[str, Any]],
-) -> Path:
-    """Mirror confirmed storyboard details into a tool-ready, per-shot keyframe execution file."""
-    root = project_root.resolve()
-    episode_dir = _episode_directory(root, episode_id)
-    assert_keyframe_generation_allowed(root, episode_id)
-    manifest_path = episode_dir / "keyframe-manifest.json"
-    if not manifest_path.is_file():
-        raise FileNotFoundError("本集尚未创建关键帧方案")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("status") != "user_confirmed":
-        raise ValueError("关键帧方案尚未获用户确认，不能创建执行单")
-    shots = _validate_execution_details(manifest.get("shots", []), shot_details)
-    settings = _read_project_settings(root)
-    frame_format = settings.get("format") or "项目指定画幅"
-
+def _render_v2_execution(manifest: dict[str, Any], frame_format: str) -> str:
+    """Render the human-facing execution sheet from the persisted v2 source."""
     blocks = [
-        f"# {episode_id} 关键帧执行单",
+        f"# {manifest['episode_id']} 关键帧执行单",
         "",
-        "本文件逐镜继承已确认分镜的时长、画面、台词、声音、转场与提示词；只额外补关键帧文件和每张帧图提示词。它不是新的剧本或简化版分镜。",
+        "本文件展示 v2 执行单的当前确认版；JSON 保存逐阶段输入、哈希、质检和全部版本历史。",
         "",
-        "- 前置确认：正式剧本、导演版分镜和关键帧方案均已获用户确认。",
+        f"- 状态：{manifest.get('status', 'ready')}",
         f"- 画幅：{frame_format}",
         "- 图生视频规则：每镜只执行本镜动作；对白是否在视频内生成由“声音策略”决定。",
         "",
     ]
-    for shot in shots:
+    for shot in manifest["shots"]:
+        references = "、".join(shot["asset_references"])
         duration = f"{shot['duration_seconds']:g} 秒"
-        reference_labels = "、".join(shot["asset_references"])
         video_prompt = (
             f"{duration}，{frame_format}，{shot['shot_size']}，{shot['camera_movement']}。"
             f"场景：{shot['scene']}。起始画面：{shot['start_state']}。"
             f"动作过程：{shot['motion']}。结束画面：{shot['end_state']}。"
             f"声音策略：{shot['voice_strategy']}；台词：{shot['dialogue']}；音效：{shot['sound_effects']}。"
             f"入点：{shot['transition_in']}。出点 / 转场：{shot['transition_out']}。"
-            f"参考素材：{reference_labels}。保持角色、场景、道具与已确认素材一致；不要字幕、文字、Logo 或水印。"
+            f"参考素材：{references}。保持角色、场景、道具与已确认素材一致；不要字幕、文字、Logo 或水印。"
         )
-        frame_rows = "\n".join(
-            f"| {frame} | `keyframes/pending/{_keyframe_filename(shot['shot_id'], frame)}` | {shot['frame_prompts'][frame]} |"
-            for frame in shot["frames"]
-        )
+        rows = []
+        for frame in shot["frames"]:
+            confirmed = frame.get("confirmed_revision") or {}
+            current_path = confirmed.get("path", "待确认")
+            rows.append(f"| {frame['frame_kind']} | `{current_path}` | {frame['frame_spec']['prompt']} | {frame['status']} |")
         blocks.extend(
             [
                 f"## KF{shot['shot_id']}｜{shot['frame_strategy_label']}",
@@ -800,7 +919,7 @@ def create_keyframe_execution_pack(
                 f"- 景别：{shot['shot_size']}",
                 f"- 运镜：{shot['camera_movement']}",
                 f"- 场景：{shot['scene']}",
-                f"- 素材参考：{reference_labels}",
+                f"- 素材参考：{references}",
                 f"- 画面起点：{shot['start_state']}",
                 f"- 动作过程：{shot['motion']}",
                 f"- 画面终点：{shot['end_state']}",
@@ -816,9 +935,9 @@ def create_keyframe_execution_pack(
                 "",
                 "### 关键帧文件与出图提示词",
                 "",
-                "| 帧类型 | 文件 | 出图提示词 |",
-                "| --- | --- | --- |",
-                frame_rows,
+                "| 帧类型 | 当前确认文件 | 出图提示词 | 状态 |",
+                "| --- | --- | --- | --- |",
+                *rows,
                 "",
                 "### 图生视频提示词",
                 "",
@@ -826,17 +945,479 @@ def create_keyframe_execution_pack(
                 "",
             ]
         )
+    return "\n".join(blocks)
+
+
+def create_keyframe_execution_pack(
+    project_root: Path,
+    episode_id: str,
+    shot_details: list[dict[str, Any]],
+) -> Path:
+    """Create a v2, stateful execution pack from an approved keyframe plan."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    assert_keyframe_generation_allowed(root, episode_id)
+    manifest_path = episode_dir / "keyframe-manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError("本集尚未创建关键帧方案")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("status") != "user_confirmed":
+        raise ValueError("关键帧方案尚未获用户确认，不能创建执行单")
+    shots = _validate_execution_details(manifest.get("shots", []), shot_details)
+    # Resolve while creating the pack so v2 never starts from only a display
+    # name.  The human-readable names remain in asset_references and Markdown.
+    for shot in shots:
+        try:
+            shot["resolved_asset_uses"] = resolve_keyframe_asset_uses(root, shot["asset_uses"])
+        except KeyframeConsistencyError as error:
+            raise ValueError(f"镜头 {shot['shot_id']} 的结构化素材用途无法解析：{error}") from error
+        resolved_ids = {item["asset_id"] for item in shot["resolved_asset_uses"]}
+        for frame_kind, spec in shot["frame_specs"].items():
+            contract = spec["continuity_contract"]
+            if contract and not set(contract["asset_ids"]).issubset(resolved_ids):
+                raise ValueError(f"镜头 {shot['shot_id']} 的 {frame_kind} continuity_contract 引用了未使用素材")
+    v2_shots: list[dict[str, Any]] = []
+    for shot in shots:
+        frames = []
+        frame_kinds = shot.pop("frames")
+        frame_specs = shot.pop("frame_specs")
+        for frame_kind in frame_kinds:
+            spec = frame_specs[frame_kind]
+            contract = spec["continuity_contract"]
+            frames.append(
+                {
+                    "frame_kind": frame_kind,
+                    "status": "waiting_for_dependency" if contract else "planned",
+                    "frame_spec": spec,
+                    "anchor_query": (
+                        {"source": "confirmed_predecessor", **contract["predecessor"]} if contract else None
+                    ),
+                    "plans": [],
+                    "confirmed_revision": None,
+                }
+            )
+        v2_shots.append({**shot, "frames": frames})
+    known_frames = {
+        (shot["shot_id"], frame["frame_kind"])
+        for shot in v2_shots
+        for frame in shot["frames"]
+    }
+    for shot in v2_shots:
+        for frame in shot["frames"]:
+            contract = frame["frame_spec"]["continuity_contract"]
+            if contract and (contract["predecessor"]["shot_id"], contract["predecessor"]["frame_kind"]) not in known_frames:
+                raise ValueError(f"镜头 {shot['shot_id']} 的 {frame['frame_kind']} continuity_contract predecessor 不在本执行单中")
+    execution_manifest = {
+        "schema_version": 2,
+        "episode_id": episode_id,
+        "status": "ready",
+        "created_at": _utcnow(),
+        "user_overrides": [],
+        "reference_boards": [],
+        "shots": v2_shots,
+    }
     execution_path = episode_dir / "keyframe-execution.md"
-    execution_path.write_text("\n".join(blocks), encoding="utf-8")
-    (episode_dir / "keyframe-execution-manifest.json").write_text(
-        json.dumps({"episode_id": episode_id, "status": "ready", "shots": shots}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_execution_pack(root, episode_dir, execution_manifest)
     state = _read_episode_state(episode_dir)
     state["keyframe_execution_status"] = "ready"
     state["keyframe_execution_path"] = "keyframe-execution.md"
     _write_episode_state(episode_dir, state)
     return execution_path
+
+
+def _write_execution_pack(root: Path, episode_dir: Path, manifest: dict[str, Any]) -> None:
+    manifest_path = _manifest_path(episode_dir)
+    frame_format = _read_project_settings(root).get("format") or "项目指定画幅"
+    execution_path = episode_dir / "keyframe-execution.md"
+    manifest_temp = manifest_path.with_name(f".{manifest_path.name}.tmp")
+    execution_temp = execution_path.with_name(f".{execution_path.name}.tmp")
+    manifest_temp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    execution_temp.write_text(_render_v2_execution(manifest, frame_format), encoding="utf-8")
+    manifest_temp.replace(manifest_path)
+    execution_temp.replace(execution_path)
+
+
+def _plan_id(frame: dict[str, Any], shot_id: str) -> str:
+    """Reserve a stable plan ID until it has reached a runnable plan state."""
+    plans = frame.setdefault("plans", [])
+    if plans and plans[-1].get("status") in {"waiting_for_dependency", "reference_board_required"}:
+        return str(plans[-1]["plan_id"])
+    return f"P-{_frame_key(shot_id, frame['frame_kind'])}-r{len(plans) + 1:03d}"
+
+
+def _confirmed_anchor(manifest: dict[str, Any], contract: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not contract:
+        return None
+    predecessor = contract["predecessor"]
+    _, frame = _find_frame(manifest, predecessor["shot_id"], predecessor["frame_kind"])
+    confirmed = frame.get("confirmed_revision")
+    if not confirmed:
+        return None
+    return {
+        "shot_id": predecessor["shot_id"],
+        "frame_kind": predecessor["frame_kind"],
+        "status": frame.get("status"),
+        **confirmed,
+    }
+
+
+def prepare_keyframe_generation(
+    project_root: Path, episode_id: str, shot_id: str, frame_kind: str
+) -> dict[str, Any]:
+    """Resolve one v2 frame into a persisted pure-scheduler generation plan.
+
+    This function only prepares local state.  It intentionally invokes no image
+    provider: callers hand its persisted stages to their adapter and later call
+    ``record_stage_generation`` with the adapter result.
+    """
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    manifest = _read_v2_manifest(episode_dir)
+    shot, frame = _find_frame(manifest, str(shot_id), str(frame_kind))
+    if frame.get("status") == "confirmed":
+        raise ValueError("已确认关键帧不能重新准备；请创建新的关键帧方案")
+    prior_plan = frame.get("plans", [])[-1] if frame.get("plans") else None
+    if prior_plan and prior_plan.get("status") == "planned":
+        retryable = [stage for stage in prior_plan.get("stages", []) if stage.get("status") in {"failed", "needs_regeneration"}]
+        if retryable:
+            retry = retryable[0]
+            retry_index = prior_plan["stages"].index(retry)
+            if all(stage.get("status") == "qa_passed" for stage in prior_plan["stages"][:retry_index]):
+                retry["status"] = "planned"
+                retry.pop("error", None)
+                retry.pop("regeneration_reason", None)
+                frame["status"] = "planned"
+                _write_execution_pack(root, episode_dir, manifest)
+                return prior_plan
+    contract = frame["frame_spec"]["continuity_contract"]
+    anchor = _confirmed_anchor(manifest, contract)
+    try:
+        resolved_uses = resolve_keyframe_asset_uses(root, shot["asset_uses"])
+        applicable = resolve_applicable_overrides(
+            root, manifest.get("user_overrides", []), shot["shot_id"], {item["asset_id"] for item in resolved_uses}
+        )
+    except KeyframeConsistencyError as error:
+        raise ValueError(f"关键帧输入无法准备：{error}") from error
+    plan_id = _plan_id(frame, shot["shot_id"])
+    try:
+        generated = build_generation_plan(
+            plan_id,
+            frame["frame_spec"],
+            resolved_uses,
+            applicable,
+            anchor,
+            manifest.get("reference_boards", []),
+        )
+    except KeyframeConsistencyError as error:
+        raise ValueError(f"关键帧计划无法生成：{error}") from error
+    persisted = {
+        **generated,
+        "created_at": _utcnow(),
+        "resolved_asset_uses": resolved_uses,
+        "applicable_overrides": applicable,
+    }
+    plans = frame.setdefault("plans", [])
+    if plans and plans[-1].get("plan_id") == plan_id and plans[-1].get("status") in {"waiting_for_dependency", "reference_board_required"}:
+        plans[-1] = persisted
+    else:
+        plans.append(persisted)
+    if generated["status"] == "waiting_for_dependency":
+        frame["status"] = "waiting_for_dependency"
+    else:
+        frame["status"] = "planned"
+    _write_execution_pack(root, episode_dir, manifest)
+    return persisted
+
+
+def _expected_stage_inputs(plan: dict[str, Any], stage: dict[str, Any]) -> list[dict[str, Any]]:
+    expected: list[dict[str, Any]] = []
+    for input_image in stage.get("input_images", []):
+        if input_image.get("role") == "edit_target" and input_image.get("source") == "previous_stage":
+            previous = _stage(plan, str(input_image["stage_id"]))
+            qa_output = previous.get("qa_output")
+            if previous.get("status") != "qa_passed" or not qa_output:
+                raise ValueError("上一阶段尚未通过 QA，不能使用其作为 edit_target")
+            expected.append({"role": "edit_target", "path": qa_output["path"], "sha256": qa_output["sha256"]})
+        else:
+            expected.append({key: input_image.get(key) for key in ("role", "path", "sha256")})
+    return expected
+
+
+def _validate_generation_result(root: Path, plan_id: str, stage_id: str, result: dict[str, Any], expected: list[dict[str, Any]]) -> tuple[Path, str, list[dict[str, Any]]]:
+    required = ("plan_id", "stage_id", "tool_request_id", "prompt", "input_images", "started_at", "completed_at")
+    missing = [field for field in required if not result.get(field)]
+    if missing:
+        raise ValueError(f"生成结果缺少字段：{', '.join(missing)}")
+    if result["plan_id"] != plan_id or result["stage_id"] != stage_id:
+        raise ValueError("生成结果的 plan_id 或 stage_id 不匹配")
+    actual = result["input_images"]
+    if not isinstance(actual, list):
+        raise ValueError("生成结果 input_images 必须是列表")
+    normalized = []
+    for image in actual:
+        if not isinstance(image, dict):
+            raise ValueError("生成结果 input_images 每项必须是对象")
+        _, path = _project_image(root, image.get("path"), "生成输入 path")
+        if not image.get("sha256") or _sha256(root / path) != image["sha256"]:
+            raise ValueError(f"生成输入哈希不匹配：{path}")
+        normalized.append({"role": image.get("role"), "path": path, "sha256": image.get("sha256")})
+    if normalized != expected:
+        raise ValueError("生成结果实际输入与已批准阶段输入不完全一致")
+    output, output_path = _project_image(root, result.get("output_path"), "生成 output_path")
+    return output, output_path, normalized
+
+
+def record_stage_generation(
+    project_root: Path, episode_id: str, plan_id: str, stage_id: str, generation_result: dict[str, Any]
+) -> dict[str, Any]:
+    """Persist a provider result after exact approved-input and hash checks."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    manifest = _read_v2_manifest(episode_dir)
+    shot, frame, plan = _find_plan(manifest, plan_id)
+    stage = _stage(plan, stage_id)
+    if plan.get("status") != "planned" or stage.get("status") != "planned":
+        raise ValueError("该阶段当前不允许记录生成结果")
+    expected = _expected_stage_inputs(plan, stage)
+    if len(expected) > MAX_INPUT_IMAGES:
+        raise ValueError("已批准阶段输入超过 5 张")
+    if generation_result.get("error"):
+        stage.update({"status": "failed", "error": str(generation_result["error"]), "failed_at": _utcnow()})
+        frame["status"] = "failed"
+        _write_execution_pack(root, episode_dir, manifest)
+        return stage
+    output, source_path, inputs = _validate_generation_result(root, plan_id, stage_id, generation_result, expected)
+    attempts = stage.setdefault("attempts", [])
+    revision, destination = _next_revision(
+        episode_dir / "keyframes" / "work" / _frame_key(shot["shot_id"], frame["frame_kind"]),
+        f"-{stage['kind']}{output.suffix.lower() or '.png'}",
+    )
+    shutil.copy2(output, destination)
+    record = {
+        "revision": revision,
+        "tool_request_id": generation_result["tool_request_id"],
+        "prompt": generation_result["prompt"],
+        "input_images": inputs,
+        "source_output_path": source_path,
+        "path": destination.relative_to(root).as_posix(),
+        "sha256": _sha256(destination),
+        "started_at": generation_result["started_at"],
+        "completed_at": generation_result["completed_at"],
+    }
+    attempts.append(record)
+    stage.update({"status": "generated", "generation": record, "output": {key: record[key] for key in ("revision", "path", "sha256")}})
+    frame["status"] = "generating"
+    _write_execution_pack(root, episode_dir, manifest)
+    return record
+
+
+def _validate_qa_result(result: dict[str, Any]) -> None:
+    if result.get("status") not in {"pass", "uncertain", "fail"}:
+        raise ValueError("QA status 必须是 pass、uncertain 或 fail")
+    if result.get("reviewer_type") not in {"automated", "user"}:
+        raise ValueError("QA reviewer_type 必须是 automated 或 user")
+    if not result.get("checked_at"):
+        raise ValueError("QA 结果缺少 checked_at")
+    checks = result.get("checks")
+    if not isinstance(checks, list) or not checks:
+        raise ValueError("QA 结果必须包含 checks")
+    for check in checks:
+        if not isinstance(check, dict) or check.get("category") not in QA_CATEGORIES or check.get("status") not in {"pass", "uncertain", "fail"}:
+            raise ValueError("QA checks 包含非法类别或状态")
+        confidence = check.get("confidence")
+        if not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+            raise ValueError("QA check confidence 必须在 0 至 1 之间")
+        if not isinstance(check.get("evidence_paths", []), list):
+            raise ValueError("QA check evidence_paths 必须是列表")
+    if not isinstance(result.get("issues", []), list):
+        raise ValueError("QA issues 必须是列表")
+
+
+def _stage_uses_board(stage: dict[str, Any]) -> bool:
+    return any(item.get("role") == "reference_board" for item in stage.get("input_images", []))
+
+
+def _confirm_final_frame(root: Path, episode_dir: Path, shot: dict[str, Any], frame: dict[str, Any], stage: dict[str, Any]) -> None:
+    output = stage["output"]
+    source, _ = _project_image(root, output["path"], "QA 通过产图")
+    final_dir = episode_dir / "keyframes" / "final" / _frame_key(shot["shot_id"], frame["frame_kind"])
+    revision, destination = _next_revision(final_dir, source.suffix.lower() or ".png")
+    shutil.copy2(source, destination)
+    previous = frame.get("confirmed_revision")
+    confirmed = {"revision": revision, "path": destination.relative_to(root).as_posix(), "sha256": _sha256(destination), "confirmed_at": _utcnow()}
+    frame["confirmed_revision"] = confirmed
+    if previous:
+        previous["superseded_by"] = revision
+        confirmed["supersedes"] = previous["revision"]
+    frame["status"] = "confirmed"
+
+
+def record_stage_qa(
+    project_root: Path, episode_id: str, plan_id: str, stage_id: str, qa_result: dict[str, Any]
+) -> dict[str, Any]:
+    """Record structured QA and perform only the legal frame-state transition."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    manifest = _read_v2_manifest(episode_dir)
+    shot, frame, plan = _find_plan(manifest, plan_id)
+    stage = _stage(plan, stage_id)
+    if stage.get("status") not in {"generated", "pending_review"}:
+        raise ValueError("该阶段当前不允许记录 QA")
+    _validate_qa_result(qa_result)
+    if stage.get("status") == "pending_review" and qa_result["reviewer_type"] != "user":
+        raise ValueError("pending_review 阶段只能由用户审核决定")
+    stage["qa"] = dict(qa_result)
+    automated_pass = (
+        qa_result["reviewer_type"] == "automated"
+        and qa_result["status"] == "pass"
+        and all(check["status"] == "pass" and check["confidence"] >= 0.85 for check in qa_result["checks"])
+    )
+    user_pass = qa_result["reviewer_type"] == "user" and qa_result["status"] == "pass"
+    if qa_result["status"] == "uncertain" or (_stage_uses_board(stage) and not user_pass) or (qa_result["status"] == "pass" and not (automated_pass or user_pass)):
+        stage["status"] = "pending_review"
+        frame["status"] = "pending_review"
+    elif qa_result["status"] == "fail":
+        stage["status"] = "needs_regeneration"
+        stage["regeneration_reason"] = qa_result.get("issues", [])
+        frame["status"] = "needs_regeneration"
+    else:
+        stage["status"] = "qa_passed"
+        stage["qa_output"] = dict(stage["output"])
+        stages = plan.get("stages", [])
+        if stage is stages[-1]:
+            _confirm_final_frame(root, episode_dir, shot, frame, stage)
+        else:
+            frame["status"] = "generating"
+    _write_execution_pack(root, episode_dir, manifest)
+    return stage
+
+
+def register_user_override(project_root: Path, episode_id: str, override: dict[str, Any]) -> dict[str, Any]:
+    """Safely register a user image as a dimension-scoped local override."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    manifest = _read_v2_manifest(episode_dir)
+    role = override.get("role")
+    if role not in ASSET_ROLES:
+        raise ValueError("用户覆盖 role 不合法")
+    target_asset_id = override.get("target_asset_id")
+    if role in {"character_identity", "prop_identity"} and not target_asset_id:
+        raise ValueError(f"{role} 覆盖必须指定 target_asset_id")
+    scope = override.get("scope")
+    if scope not in {"shot", "continuity_run", "episode"}:
+        raise ValueError("用户覆盖 scope 不合法")
+    scope_ids = override.get("scope_ids", [])
+    if not isinstance(scope_ids, list) or (scope != "episode" and not all(isinstance(value, str) and value for value in scope_ids)):
+        raise ValueError("用户覆盖 scope_ids 不合法")
+    source, source_relative = _project_image(root, override.get("path"), "用户覆盖 path")
+    supplied_hash = override.get("sha256")
+    source_hash = _sha256(source)
+    if supplied_hash and supplied_hash != source_hash:
+        raise ValueError("用户覆盖哈希不匹配")
+    overrides = manifest.setdefault("user_overrides", [])
+    override_id = str(override.get("override_id") or f"UO-{len(overrides) + 1:03d}")
+    if any(item.get("override_id") == override_id for item in overrides):
+        raise ValueError(f"用户覆盖 ID 已存在：{override_id}")
+    destination_dir = root / "references" / "user"
+    revision, destination = _next_revision(destination_dir, source.suffix.lower() or ".png")
+    # Include the stable ID in the filename while retaining monotonic revisions.
+    named_destination = destination.with_name(f"{override_id}-{revision}{destination.suffix}")
+    if named_destination.exists():
+        raise FileExistsError(f"用户覆盖目标已存在：{named_destination}")
+    shutil.copy2(source, named_destination)
+    registered = {
+        "override_id": override_id,
+        "path": named_destination.relative_to(root).as_posix(),
+        "sha256": _sha256(named_destination),
+        "role": role,
+        "target_asset_id": target_asset_id,
+        "scope": scope,
+        "scope_ids": list(scope_ids),
+        "source": override.get("source", "user_upload"),
+        "created_at": override.get("created_at", _utcnow()),
+        "source_path": source_relative,
+        "status": "active",
+    }
+    overrides.append(registered)
+    _write_execution_pack(root, episode_dir, manifest)
+    return registered
+
+
+def _asset_members(root: Path, members: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    index_path = root / "project-settings" / "asset-index.json"
+    assets = json.loads(index_path.read_text(encoding="utf-8")).get("assets", []) if index_path.is_file() else []
+    by_id = {asset.get("asset_id"): asset for asset in assets}
+    verified: list[dict[str, Any]] = []
+    for member in members:
+        asset_id = member.get("asset_id")
+        asset = by_id.get(asset_id)
+        if not asset or asset.get("status") not in {None, "confirmed"}:
+            raise ValueError(f"参考板成员不是已确认资产：{asset_id}")
+        source, relative = _project_image(root, member.get("path"), "参考板成员 path")
+        if _sha256(source) != member.get("sha256"):
+            raise ValueError(f"参考板成员哈希不匹配：{relative}")
+        known_paths = {view.get("path") for view in asset.get("views", [])} | {asset.get("destination")}
+        if relative not in known_paths:
+            raise ValueError(f"参考板成员路径未登记到资产：{asset_id}")
+        verified.append({"asset_id": asset_id, "path": relative, "sha256": member["sha256"]})
+    return verified
+
+
+def record_reference_board(project_root: Path, episode_id: str, board_result: dict[str, Any]) -> dict[str, Any]:
+    """Persist a locally verified, unapproved board for one reserved plan/group."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    manifest = _read_v2_manifest(episode_dir)
+    plan_id = board_result.get("plan_id")
+    relationship_group = board_result.get("relationship_group")
+    if not plan_id or not relationship_group:
+        raise ValueError("参考板结果缺少 plan_id 或 relationship_group")
+    _, _, plan = _find_plan(manifest, str(plan_id))
+    if plan.get("status") != "reference_board_required" or plan.get("relationship_group") != relationship_group:
+        raise ValueError("该计划当前不需要这个参考板")
+    members = _asset_members(root, board_result.get("members", []))
+    expected_ids = set(plan.get("asset_ids", []))
+    if {member["asset_id"] for member in members} != expected_ids:
+        raise ValueError("参考板成员与需要的关系组不完全一致")
+    source, _ = _project_image(root, board_result.get("output_path"), "参考板 output_path")
+    boards = manifest.setdefault("reference_boards", [])
+    same_plan = [item for item in boards if item.get("plan_id") == plan_id and item.get("relationship_group") == relationship_group]
+    revision, destination = _next_revision(root / "references" / "boards", source.suffix.lower() or ".png")
+    board_id = f"RB-{plan_id}-r{len(same_plan) + 1:03d}"
+    named_destination = destination.with_name(f"{board_id}{destination.suffix}")
+    shutil.copy2(source, named_destination)
+    board = {
+        "board_id": board_id,
+        "plan_id": plan_id,
+        "relationship_group": relationship_group,
+        "path": named_destination.relative_to(root).as_posix(),
+        "sha256": _sha256(named_destination),
+        "members": members,
+        "member_asset_ids": [member["asset_id"] for member in members],
+        "layout": board_result.get("layout", "unspecified"),
+        "low_resolution_risk": bool(board_result.get("low_resolution_risk", True)),
+        "approved": False,
+        "created_at": _utcnow(),
+    }
+    boards.append(board)
+    _write_execution_pack(root, episode_dir, manifest)
+    return board
+
+
+def approve_reference_board(project_root: Path, episode_id: str, board_id: str) -> dict[str, Any]:
+    """Record explicit user approval; scheduling still has to be rerun by caller."""
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    manifest = _read_v2_manifest(episode_dir)
+    for board in manifest.get("reference_boards", []):
+        if board.get("board_id") == board_id:
+            if board.get("approved"):
+                raise ValueError("参考板已经确认")
+            board["approved"] = True
+            board["approved_at"] = _utcnow()
+            _write_execution_pack(root, episode_dir, manifest)
+            return board
+    raise ValueError(f"执行单不存在参考板：{board_id}")
 
 
 def _write_episode_assets_file(episode_dir: Path, assets_by_id: dict[str, dict[str, Any]], state: dict[str, Any]) -> None:
