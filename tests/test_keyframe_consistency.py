@@ -180,6 +180,41 @@ class KeyframeConsistencyTests(unittest.TestCase):
         self.assertEqual(plan["status"], "planned")
         self.assertEqual(plan["stages"][0]["input_images"][0]["role"], "reference_board")
 
+    def test_identity_override_preserves_oversized_relationship_group(self) -> None:
+        uses = [self.required(f"C{index:02d}", relationship_group="all-hold-hands") for index in range(1, 7)]
+        override = {
+            "override_id": "UO-C01",
+            "path": "references/user-c01.png",
+            "sha256": "user-c01",
+            "role": "character_identity",
+            "target_asset_id": "C01",
+            "scope": "shot",
+            "scope_ids": ["01"],
+        }
+        plan = build_generation_plan("P-override-group", {"continuity_contract": None}, uses, [override], None, [])
+        self.assertEqual(plan["status"], "reference_board_required")
+        self.assertEqual(plan["relationship_group"], "all-hold-hands")
+        self.assertEqual(plan["asset_ids"], [f"C{index:02d}" for index in range(1, 7)])
+
+    def test_required_inputs_are_phase_ordered_despite_caller_order(self) -> None:
+        uses = [
+            self.required("P02", "prop_identity", subject_tier="secondary"),
+            self.required("C02", "character_identity", subject_tier="secondary"),
+            self.required("C01", "character_identity", subject_tier="primary"),
+            self.required("S01", "background"),
+            self.required("P01", "prop_identity", subject_tier="primary"),
+            self.required("S02", "lighting"),
+        ]
+        plan = build_generation_plan("P-phase-order", {"continuity_contract": None}, uses, [], None, [])
+        flattened = [
+            item["asset_id"]
+            for stage in plan["stages"]
+            for item in stage["input_images"]
+            if item.get("role") != "edit_target"
+        ]
+        self.assertEqual(flattened, ["S01", "S02", "C01", "P01", "C02", "P02"])
+        self.assertEqual([stage["kind"] for stage in plan["stages"]], ["background", "secondary_subjects"])
+
 
 if __name__ == "__main__":
     unittest.main()

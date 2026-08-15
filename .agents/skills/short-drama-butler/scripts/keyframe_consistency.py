@@ -21,6 +21,8 @@ CONTINUITY_DIMENSIONS = {"space", "character_identity", "prop_identity", "compos
 SCOPE_PRIORITY = {"episode": 0, "continuity_run": 1, "shot": 2}
 CHARACTER_VIEWS = ("front", "side", "back", "expression-sheet")
 SCENE_VIEWS = ("front", "reverse", "side", "wide", "top")
+SCHEDULING_METADATA = ("relationship_group", "subject_tier", "priority", "continuity_relevant")
+PHASE_NAMES = ("background", "primary_subjects", "secondary_subjects")
 
 
 class KeyframeConsistencyError(ValueError):
@@ -226,12 +228,14 @@ def resolve_applicable_overrides(
 def _input_from_asset(item: dict[str, Any]) -> dict[str, Any]:
     result = {key: item[key] for key in ("role", "path", "sha256")}
     result.update({"asset_id": item["asset_id"], "name": item.get("name", item["asset_id"]), "required": bool(item.get("required", False))})
-    if item.get("relationship_group"):
-        result["relationship_group"] = item["relationship_group"]
+    for field in SCHEDULING_METADATA:
+        if item.get(field) is not None:
+            result[field] = item[field]
     return result
 
 
-def _input_from_override(item: dict[str, Any]) -> dict[str, Any]:
+def _input_from_override(item: dict[str, Any], replaced: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Make a required override input while preserving replaced scheduling facts."""
     result = {
         "role": item["role"],
         "path": item["path"],
@@ -241,6 +245,10 @@ def _input_from_override(item: dict[str, Any]) -> dict[str, Any]:
     }
     if item.get("target_asset_id"):
         result["asset_id"] = item["target_asset_id"]
+    if replaced:
+        for field in SCHEDULING_METADATA:
+            if replaced.get(field) is not None:
+                result[field] = replaced[field]
     return result
 
 
@@ -263,15 +271,40 @@ def _group_candidates(candidates: list[dict[str, Any]]) -> list[list[dict[str, A
     return ordered
 
 
+def _candidate_phase(item: dict[str, Any]) -> int:
+    """Return the prescribed generation phase for an input."""
+    explicit_phase = item.get("schedule_phase")
+    if explicit_phase is not None:
+        return int(explicit_phase)
+    role = item["role"]
+    if role in {"background", "lighting", "composition", "style"}:
+        return 0
+    if item.get("subject_tier") == "primary":
+        return 1
+    if role == "character_identity" and item.get("subject_tier") != "secondary":
+        return 1
+    return 2
+
+
+def _candidate_sort_key(item: dict[str, Any]) -> tuple[int, str, str, str]:
+    return (
+        _candidate_phase(item),
+        item["role"],
+        str(item.get("asset_id") or ""),
+        str(item.get("override_id") or ""),
+    )
+
+
+def _group_phase(group: list[dict[str, Any]]) -> int:
+    return min(_candidate_phase(item) for item in group)
+
+
+def _group_sort_key(group: list[dict[str, Any]]) -> tuple[int, tuple[int, str, str, str]]:
+    return (_group_phase(group), min(_candidate_sort_key(item) for item in group))
+
+
 def _stage_kind(entries: list[dict[str, Any]]) -> str:
-    roles = {entry["role"] for entry in entries}
-    if roles & {"background", "lighting", "composition", "style"}:
-        return "background"
-    if any(entry.get("subject_tier") == "primary" for entry in entries):
-        return "primary_subjects"
-    if "character_identity" in roles:
-        return "primary_subjects"
-    return "secondary_subjects"
+    return PHASE_NAMES[_candidate_phase(entries[0])] if entries else "background"
 
 
 def _approved_board(
@@ -335,14 +368,16 @@ def build_generation_plan(
     overrides = applicable_overrides.get("effective", []) if isinstance(applicable_overrides, dict) else applicable_overrides
     candidates = [_input_from_asset(item) for item in resolved_uses]
     for override in overrides:
-        override_input = _input_from_override(override)
-        target_key = _candidate_key(override_input)
         if override.get("target_asset_id"):
+            target_key = (str(override["target_asset_id"]), str(override["role"]))
+            replaced = [item for item in candidates if _candidate_key(item) == target_key]
+            override_input = _input_from_override(override, replaced[0] if replaced else None)
             candidates = [item for item in candidates if _candidate_key(item) != target_key]
         else:
             # A dimension-wide override (for example a user beach background)
             # replaces only that dimension's default anchors, never identities
             # or geometry represented by other roles.
+            override_input = _input_from_override(override)
             candidates = [item for item in candidates if item.get("role") != override["role"]]
         candidates.append(override_input)
 
@@ -354,7 +389,8 @@ def build_generation_plan(
     required = [item for item in candidates if item.get("required")]
     optional = [item for item in candidates if not item.get("required")]
 
-    groups = _group_candidates(required)
+    groups = [sorted(group, key=_candidate_sort_key) for group in _group_candidates(required)]
+    groups.sort(key=_group_sort_key)
     normalized_groups: list[list[dict[str, Any]]] = []
     for group in groups:
         relationship_group = group[0].get("relationship_group")
@@ -379,6 +415,7 @@ def build_generation_plan(
                         "board_id": board["board_id"],
                         "relationship_group": relationship_group,
                         "covers_asset_ids": sorted(asset_ids),
+                        "schedule_phase": _group_phase(group),
                         "required": True,
                     }
                 ]
