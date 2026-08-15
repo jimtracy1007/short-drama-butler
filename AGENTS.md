@@ -12,7 +12,7 @@ python short-drama-butler/scripts/butler.py inspect
 python short-drama-butler/scripts/butler.py status
 ```
 
-3. 用户只需说「咕噜」「泡泡湾」这类名称。不要让用户重复提供路径或内部编号。
+3. 用户只需说「咕噜」「小鸟和咕噜在森林里」或「今天不知道写啥，你出个故事」。不要让用户填写 `--asset`、路径或内部编号。有故事时把原话交给 `butler.py new-episode --story`；没故事时先 `butler.py propose-story`，用已有角色出 2-3 个选项等用户点头。
 
 ## 出图硬规则
 

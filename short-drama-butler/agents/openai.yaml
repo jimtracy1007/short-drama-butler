@@ -1,4 +1,4 @@
 interface:
   display_name: "短剧管家"
   short_description: "管理AI短剧项目记忆，并在出图时强制附上已确认角色/场景参考图"
-  default_prompt: "使用 $short-drama-butler。先运行 butler.py status 与 inspect；做图时必须把已确认参考图读进对话，禁止纯文生图。"
+  default_prompt: "使用 $short-drama-butler。先运行 butler.py status 与 inspect。用户没故事时先 propose-story；做图时必须把已确认参考图读进对话，禁止纯文生图。"

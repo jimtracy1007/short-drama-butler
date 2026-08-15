@@ -19,8 +19,9 @@ description: Use when initializing or continuing an AI short-drama project, and 
 | --- | --- |
 | 初始化或导入旧资料 | 读取固定设定，建立项目文件、资产预检和冲突清单。 |
 | 整理/新增素材 | 以名称、别名、类别、范围和图片路径登记素材；内部自动维护 `Cxx`、`Sxx`、`Pxx`，默认新素材仅限本集。 |
-| 创建一集 | 运行 `scripts/butler.py new-episode`。用户说「小鸟和咕噜在森林里」时，必须把未登记名称列为新增资产，并问清类别（角色/场景/道具）。 |
-| 生产本集资产 | 大纲确认后运行 `scripts/butler.py plan-assets`；出图前必须 `dispatch-asset` 并附上已确认参考图；确认图片后再 `provide-asset` / `confirm-asset`。 |
+| 创建一集 | 用户只说故事，例如「小鸟和咕噜在森林里快乐的一天」。运行 `scripts/butler.py new-episode --story "<用户原话>"`。随后用项目指定的分镜 Skill 生成故事梗概、人物小传和本集大纲，写入 `story-outline.md` 展示给用户。用户确认后才运行 `approve-story`，再进入素材生产。不要让用户填写 `--asset`、路径或内部编号。 |
+| 今天不知道写啥 | 用户说「今天不知道写啥」「你出个故事」「随便做一集」时，先运行 `scripts/butler.py propose-story`。若返回 `allowed: false`，先确认上集连续性，不要出故事、不要 `new-episode`。允许时根据已有锁定角色、场景和上集承接，用中文给出 2-3 个本集故事，等用户点头后再 `new-episode --story`。确认前不要建集、不要出图。 |
+| 生产本集资产 | 仅在 AI 故事概要获用户确认后运行 `scripts/butler.py plan-assets`；出图前必须 `dispatch-asset` 并附上已确认参考图；确认图片后再 `provide-asset` / `confirm-asset`。 |
 | 审核剧本与分镜 | 展示正式剧本和分镜，等待用户确认或按反馈修改；未经确认不得规划关键帧。确认后运行 `scripts/butler.py approve-script`。 |
 | 规划 / 生成关键帧 | 逐镜列出首帧、尾帧、过程帧的数量和用途；方案确认后建立 v2 执行单。任何出图必须先运行 `scripts/butler.py dispatch-keyframe`，把返回路径读进当前对话后再生成。 |
 | 结束一集 / 继续下一集 | 本集定稿后确认连续性记录；创建下一集时自动继承最近一份已确认记录。 |
@@ -36,8 +37,12 @@ description: Use when initializing or continuing an AI short-drama project, and 
 ```bash
 python short-drama-butler/scripts/butler.py status
 python short-drama-butler/scripts/butler.py inspect
-python short-drama-butler/scripts/butler.py new-episode --episode EP001 --title 森林的一天 --story "..." --asset "咕噜" --asset "小鸟:characters" --asset "森林:scenes"
-python short-drama-butler/scripts/butler.py plan-assets --episode EP001 --new "小鸟:characters:黄色小鸟"
+python short-drama-butler/scripts/butler.py propose-story
+python short-drama-butler/scripts/butler.py new-episode --story "小鸟和咕噜在森林里快乐的一天"
+python short-drama-butler/scripts/butler.py record-story-outline --episode EP001 --file <AI生成的概要.md>
+python short-drama-butler/scripts/butler.py approve-story --episode EP001
+python short-drama-butler/scripts/butler.py reuse-asset --episode EP003 --name 小螃蟹 --action use
+python short-drama-butler/scripts/butler.py plan-assets --episode EP001
 python short-drama-butler/scripts/butler.py dispatch-asset --episode EP001 --name 小鸟
 python short-drama-butler/scripts/butler.py provide-asset --episode EP001 --name 小鸟 --image front=out/bird.png
 python short-drama-butler/scripts/butler.py confirm-asset --episode EP001 --name 小鸟
@@ -62,9 +67,9 @@ python short-drama-butler/scripts/butler.py record-image --episode EP001 --dispa
 
 ## 自动上下文规则
 
-创建、继续、交接一集，或生成任何图片时，先自动定位项目根目录并读取 `project.yaml`、角色圣经、素材索引、冲突清单、相关剧集文件和实际存在的旧设定文本。用户只需提供故事意图、已知名称和必要的新信息；不要要求用户重复说“读取配置”“创建清单”或提供内部 ID。
+创建、继续、交接一集，或生成任何图片时，先自动定位项目根目录并读取 `project.yaml`、角色圣经、素材索引、冲突清单、相关剧集文件和实际存在的旧设定文本。用户只需提供故事意图、已知名称和必要的新信息；不要要求用户重复说“读取配置”“创建清单”、提供内部 ID，或填写 `--asset` 这类命令参数。用户说「小鸟和咕噜在森林里」时，你必须自己从故事里识别已有素材和新角色/场景/道具，用中文复述给用户确认。只自动锁定已确认、有有效图片、且对本集可用的素材；pending、其他集专属、以及 `planned` / `image_provided` 等未确认索引项都不能自动锁定。认不准的名称先当待确认项，确认前不要写分镜。
 
-若项目还没有配置或缺少会影响创作的关键信息，只询问缺失项。默认创建流程必须产出本集需求、资产清单和交接包。
+若项目还没有配置或缺少会影响创作的关键信息，只询问缺失项。默认创建流程必须先产出交接包与待确认的 AI 故事概要；故事概要获确认后，才产出资产清单。
 
 用户说“这集 180 秒”“这集改为横屏”等只属于当前集的要求时，写入 `episode-overrides.yaml` 并在交接包中优先使用；不得改写项目默认配置或其他剧集。
 
@@ -89,7 +94,9 @@ python short-drama-butler/scripts/butler.py record-image --episode EP001 --dispa
 
 ## 本集新增资产生产关口
 
-只要大纲中出现未登记的新角色、重要场景或道具，必须在“确认大纲”与“正式剧本 / 分镜”之间执行：
+先由项目指定的 Storyboard Generator 阅读本集 `storyboard-package.md`，生成“故事梗概、人物小传、本集大纲”并保存到 `story-outline.md`。必须展示给用户；收到明确确认后运行 `scripts/butler.py approve-story --episode <ID>`。该命令未成功前，`plan-assets`、`dispatch-asset`、`provide-asset`、`confirm-asset`、`reuse-asset` 与 `approve-script` 都必须停止，不得用用户原话或未确认 AI 稿直接创建素材。
+
+只要**已确认的故事概要**中出现未登记的新角色、重要场景或道具，必须在“确认大纲”与“正式剧本 / 分镜”之间执行：
 
 1. 识别新增资产的名称、类别和视觉说明，运行 `scripts/butler.py plan-assets --episode <ID> --new '名称:characters|scenes|props:视觉说明'` 生成本集生产单。建集时已分类的草案可直接沿用。
 2. 展示生产单，待用户确认后再使用用户指定的图片工具生成参考图；也可接收用户提供的图片。出图前必须运行 `scripts/butler.py dispatch-asset`，把已确认风格/场景/角色图读进当前对话；生产单里的「必传参考图」不能省略。

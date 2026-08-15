@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from codex_image_dispatch import (
 from image_canon import ImageCanonError, find_project_root
 from project_files import (
     approve_keyframe_plan,
+    approve_story_outline,
     confirm_episode_asset,
     create_asset_production_plan,
     create_episode,
@@ -35,8 +37,10 @@ from project_files import (
     record_stage_qa,
     register_user_override,
     request_keyframe_regeneration,
+    record_story_outline,
+    decide_reuse_asset,
 )
-from workflow_status import episode_status, project_status
+from workflow_status import episode_status, list_episodes, project_status, propose_story_context
 
 
 class ButlerError(RuntimeError):
@@ -134,6 +138,10 @@ def _command_status(root: Path, args: argparse.Namespace) -> Any:
     return project_status(root)
 
 
+def _command_propose_story(root: Path, args: argparse.Namespace) -> Any:
+    return propose_story_context(root)
+
+
 def _command_init(root: Path, args: argparse.Namespace) -> Any:
     initialize_project(
         args.project_root or Path.cwd(),
@@ -146,23 +154,42 @@ def _command_init(root: Path, args: argparse.Namespace) -> Any:
         storyboard_skill=args.storyboard_skill,
     )
     target = (args.project_root or Path.cwd()).resolve()
-    return {"initialized": str(target), "next": "butler.py new-episode --episode EP001 --title <剧集名> --story <故事>"}
+    return {"initialized": str(target), "next": "butler.py new-episode --story <用户原话>"}
+
+
+def _next_episode_id(root: Path) -> str:
+    numbers = []
+    for episode in list_episodes(root):
+        match = re.match(r"EP(\d+)$", str(episode.get("episode_id", "")), re.I)
+        if match:
+            numbers.append(int(match.group(1)))
+    return f"EP{max(numbers, default=0) + 1:03d}"
+
+
+def _title_from_story(story: str) -> str:
+    first = re.split(r"[。！？\n]", str(story).strip())[0]
+    first = re.sub(r"[，、\s]+$", "", first).strip()
+    return first[:16] or "新的一集"
 
 
 def _command_new_episode(root: Path, args: argparse.Namespace) -> Any:
     references = [_parse_asset_argument(value) for value in args.asset or []]
+    episode_id = args.episode or _next_episode_id(root)
+    title = args.title or _title_from_story(args.story)
     package = create_episode(
         root,
-        args.episode,
-        args.title,
+        episode_id,
+        title,
         args.story,
         references,
         episode_overrides=_load_json_file(Path(args.overrides_file)) if args.overrides_file else None,
         standalone=args.standalone,
     )
+    status = episode_status(root, episode_id)
     return {
         "storyboard_package": package.relative_to(root).as_posix(),
-        "status": episode_status(root, args.episode),
+        "user_notice": status.get("user_notice") or "",
+        "status": status,
     }
 
 
@@ -177,8 +204,6 @@ def _command_plan_assets(root: Path, args: argparse.Namespace) -> Any:
         requests.append(entry)
     if args.requests_file:
         requests.extend(_load_json_file(Path(args.requests_file)))
-    if not requests:
-        raise ButlerError("至少需要一项新增资产")
     plan = create_asset_production_plan(root, args.episode, requests)
     return {
         "asset_production_plan": plan.relative_to(root).as_posix(),
@@ -198,9 +223,33 @@ def _command_provide_asset(root: Path, args: argparse.Namespace) -> Any:
 
 def _command_confirm_asset(root: Path, args: argparse.Namespace) -> Any:
     registered = confirm_episode_asset(
-        root, args.episode, args.name, aliases=args.alias or None, scope=args.scope
+        root, args.episode, args.name, aliases=args.alias, scope=args.scope
     )
     return {"registered": registered, "status": episode_status(root, args.episode)}
+
+
+def _command_reuse_asset(root: Path, args: argparse.Namespace) -> Any:
+    decision = decide_reuse_asset(root, args.episode, args.name, args.action)
+    return {**decision, "status": episode_status(root, args.episode)}
+
+
+def _command_record_story_outline(root: Path, args: argparse.Namespace) -> Any:
+    source = Path(args.file)
+    if not source.is_file():
+        raise ButlerError(f"找不到 AI 生成的故事概要文件：{source}")
+    path = record_story_outline(root, args.episode, source.read_text(encoding="utf-8"))
+    return {
+        "story_outline": path.relative_to(root).as_posix(),
+        "status": episode_status(root, args.episode),
+    }
+
+
+def _command_approve_story(root: Path, args: argparse.Namespace) -> Any:
+    path = approve_story_outline(root, args.episode)
+    return {
+        "story_outline": path.relative_to(root).as_posix(),
+        "status": episode_status(root, args.episode),
+    }
 
 
 def _command_approve_script(root: Path, args: argparse.Namespace) -> Any:
@@ -332,6 +381,9 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--episode")
     status.set_defaults(func=_command_status, needs_project=False)
 
+    propose = subparsers.add_parser("propose-story", help="用户没故事时，先打包已有角色和上集承接")
+    propose.set_defaults(func=_command_propose_story)
+
     init = subparsers.add_parser("init", help="初始化项目记忆")
     init.add_argument("--name", required=True)
     init.add_argument("--audience", default="")
@@ -343,13 +395,13 @@ def build_parser() -> argparse.ArgumentParser:
     init.set_defaults(func=_command_init, needs_project=False)
 
     episode = subparsers.add_parser("new-episode", help="建立一集，并检测新角色/场景/道具")
-    episode.add_argument("--episode", required=True)
-    episode.add_argument("--title", required=True)
-    episode.add_argument("--story", required=True)
+    episode.add_argument("--episode", help="缺省时自动使用下一集编号，例如 EP001")
+    episode.add_argument("--title", help="缺省时从故事里取一句短标题")
+    episode.add_argument("--story", required=True, help="用户的原话；不要改写成命令参数")
     episode.add_argument(
         "--asset",
         action="append",
-        help="出场资产；可写 名称、名称:kind。新资产建议带类别，例如 小鸟:characters",
+        help="仅供内部补漏；用户说话时不要问这项。故事里提到的名称会自动识别。",
     )
     episode.add_argument("--overrides-file")
     episode.add_argument("--standalone", action="store_true")
@@ -357,7 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan_assets = subparsers.add_parser("plan-assets", help="大纲确认后建立资产生产单")
     plan_assets.add_argument("--episode", required=True)
-    plan_assets.add_argument("--new", action="append", help="名称:类别:视觉说明")
+    plan_assets.add_argument("--new", action="append", help="一般不用。用户确认后直接 plan-assets --episode 即可，会用故事里已检出的草案。")
     plan_assets.add_argument("--requests-file")
     plan_assets.set_defaults(func=_command_plan_assets)
 
@@ -373,6 +425,21 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("--alias", action="append")
     confirm.add_argument("--scope", help="默认 episode-<ID>；确认可复用时才写 global 或 season-<N>")
     confirm.set_defaults(func=_command_confirm_asset)
+
+    reuse = subparsers.add_parser("reuse-asset", help="用户确认后，决定其他范围素材本集是否沿用")
+    reuse.add_argument("--episode", required=True)
+    reuse.add_argument("--name", required=True)
+    reuse.add_argument("--action", required=True, choices=("use", "skip"))
+    reuse.set_defaults(func=_command_reuse_asset)
+
+    record_outline = subparsers.add_parser("record-story-outline", help="登记 AI 生成、等待用户确认的故事概要")
+    record_outline.add_argument("--episode", required=True)
+    record_outline.add_argument("--file", required=True, help="含故事梗概、人物小传、本集大纲的 UTF-8 Markdown 文件")
+    record_outline.set_defaults(func=_command_record_story_outline)
+
+    approve_story = subparsers.add_parser("approve-story", help="记录用户确认 AI 故事概要")
+    approve_story.add_argument("--episode", required=True)
+    approve_story.set_defaults(func=_command_approve_story)
 
     approve_script = subparsers.add_parser("approve-script", help="记录用户确认剧本与分镜")
     approve_script.add_argument("--episode", required=True)

@@ -23,6 +23,8 @@ from image_canon import (
 )
 from project_files import (
     begin_stage_generation,
+    assert_asset_production_plan_current,
+    assert_story_outline_confirmed,
     current_keyframe_dispatch,
     current_keyframe_plan,
     normalize_asset_drafts,
@@ -199,6 +201,18 @@ def dispatch_asset(
 ) -> dict[str, Any]:
     """Build the required reference set for a new character, scene, or prop image."""
     root = Path(project_root).resolve()
+    try:
+        assert_asset_production_plan_current(root, episode_id)
+    except ValueError as error:
+        return {
+            "allowed": False,
+            "kind": "asset",
+            "episode_id": episode_id,
+            "name": name,
+            "reason": str(error),
+            "input_images": [],
+            "view_image_paths": [],
+        }
     episode_dir = _episode_dir(root, episode_id)
     asset = _production_asset(episode_dir, name)
     asset_kind = kind or (asset or {}).get("kind") or _draft_kind(episode_dir, name)

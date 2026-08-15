@@ -21,6 +21,7 @@ from asset_migration import (  # noqa: E402
 from project_files import (  # noqa: E402
     build_asset_index,
     approve_keyframe_plan,
+    approve_story_outline,
     assert_keyframe_generation_allowed,
     confirm_episode_asset,
     create_asset_production_plan,
@@ -43,6 +44,7 @@ from project_files import (  # noqa: E402
     provide_episode_asset_image,
     provide_episode_asset_images,
     record_script_and_storyboard_approval,
+    record_story_outline,
     resolve_asset_references,
     write_asset_index,
 )
@@ -63,6 +65,14 @@ class AssetMigrationTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(contents)
         return path
+
+    def approve_outline(self, root: Path, episode_id: str) -> None:
+        record_story_outline(
+            root,
+            episode_id,
+            "## 故事梗概\n\n测试梗概。\n\n## 人物小传\n\n主角保持既有设定。\n\n## 本集大纲\n\n起承转合。",
+        )
+        approve_story_outline(root, episode_id)
 
     def test_build_plan_preserves_hash_and_uses_canonical_asset_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -140,6 +150,7 @@ class AssetMigrationTests(unittest.TestCase):
                 episode_target_seconds=120,
                 content_guidelines="温暖、明亮、儿童友好；无恐怖、攻击性、字幕、Logo 或水印",
             )
+            self.write_file(root, "assets/global/characters/C01_gulu/front.png", b"gulu")
             write_asset_index(root, [{"asset_id": "C01", "name": "咕噜", "kind": "characters", "scope": "global", "destination": "assets/global/characters/C01_gulu/front.png"}])
             package = create_episode(root, "EP001", "分享的泡泡", "咕噜学习分享玩具", ["C01"])
 
@@ -195,6 +206,7 @@ class AssetMigrationTests(unittest.TestCase):
                     ],
                 )
 
+            self.approve_outline(root, "EP001")
             record_script_and_storyboard_approval(root, "EP001")
             plan_path = create_keyframe_plan(
                 root,
@@ -231,6 +243,7 @@ class AssetMigrationTests(unittest.TestCase):
             episode_dir = root / "episodes/EP001_魔法测试"
             (episode_dir / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
             (episode_dir / "storyboard.md").write_text("# 导演版分镜\n", encoding="utf-8")
+            self.approve_outline(root, "EP001")
             record_script_and_storyboard_approval(root, "EP001")
 
             self.assertEqual(recommend_keyframe_strategy(3), "start_only")
@@ -303,6 +316,7 @@ class AssetMigrationTests(unittest.TestCase):
             episode_dir = root / "episodes/EP001_海边新朋友"
             (episode_dir / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
             (episode_dir / "storyboard.md").write_text("# 分镜表\n", encoding="utf-8")
+            self.approve_outline(root, "EP001")
             record_script_and_storyboard_approval(root, "EP001")
             create_keyframe_plan(
                 root,
@@ -369,6 +383,7 @@ class AssetMigrationTests(unittest.TestCase):
             episode = root / "episodes/EP001_测试集"
             (episode / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
             (episode / "storyboard.md").write_text("# 分镜\n", encoding="utf-8")
+            self.approve_outline(root, "EP001")
             record_script_and_storyboard_approval(root, "EP001")
             create_keyframe_plan(root, "EP001", [{"shot_id": "01", "duration_seconds": 10, "action": "海浪靠岸", "strategy": "start_end"}])
             approve_keyframe_plan(root, "EP001")
@@ -468,6 +483,7 @@ class AssetMigrationTests(unittest.TestCase):
             episode = root / "episodes/EP002_海滩小螃蟹"
             (episode / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
             (episode / "storyboard.md").write_text("# 分镜\n", encoding="utf-8")
+            self.approve_outline(root, "EP002")
             record_script_and_storyboard_approval(root, "EP002")
             create_keyframe_plan(root, "EP002", [{"shot_id": "01", "duration_seconds": 5, "action": "咕噜举起贝壳", "strategy": "start_only"}])
             approve_keyframe_plan(root, "EP002")
@@ -532,6 +548,7 @@ class AssetMigrationTests(unittest.TestCase):
             episode = root / "episodes/EP001_群像"
             (episode / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
             (episode / "storyboard.md").write_text("# 分镜\n", encoding="utf-8")
+            self.approve_outline(root, "EP001")
             record_script_and_storyboard_approval(root, "EP001")
             create_keyframe_plan(root, "EP001", [{"shot_id": "01", "duration_seconds": 5, "action": "大家牵手", "strategy": "start_only"}])
             approve_keyframe_plan(root, "EP001")
@@ -876,6 +893,7 @@ class AssetMigrationTests(unittest.TestCase):
 
         for heading in (
             "## 先选一种使用方式",
+            "今天不知道写啥",
             "从零开始做一个新系列",
             "已有项目、旧文档或图片",
             "今天只做一集独立短剧",
@@ -915,6 +933,7 @@ class AssetMigrationTests(unittest.TestCase):
             root = Path(temp_dir)
             initialize_project(root, "测试项目", None, frame_format="16:9 横屏")
             create_episode(root, "EP001", "雨夜来信", "许岚在旧书店收到录音。", ["神秘访客", "旧书店"])
+            self.approve_outline(root, "EP001")
 
             plan_path = create_asset_production_plan(
                 root,
@@ -939,6 +958,7 @@ class AssetMigrationTests(unittest.TestCase):
             root = Path(temp_dir)
             initialize_project(root, "测试项目", None)
             create_episode(root, "EP001", "海滩", "小螃蟹回海。", ["小螃蟹", "海滩"])
+            self.approve_outline(root, "EP001")
             create_asset_production_plan(
                 root,
                 "EP001",
@@ -964,6 +984,7 @@ class AssetMigrationTests(unittest.TestCase):
             root = Path(temp_dir)
             initialize_project(root, "测试项目", None)
             package = create_episode(root, "EP001", "新朋友", "许岚遇见神秘访客。", ["神秘访客"])
+            self.approve_outline(root, "EP001")
             create_asset_production_plan(
                 root,
                 "EP001",
@@ -992,6 +1013,7 @@ class AssetMigrationTests(unittest.TestCase):
             root = Path(temp_dir)
             initialize_project(root, "测试项目", None)
             create_episode(root, "EP001", "新朋友", "许岚遇见小螃蟹。", ["小螃蟹"])
+            self.approve_outline(root, "EP001")
             create_asset_production_plan(
                 root,
                 "EP001",

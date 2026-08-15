@@ -23,12 +23,14 @@ from codex_image_dispatch import (  # noqa: E402
 )
 from project_files import (  # noqa: E402
     approve_keyframe_plan,
+    approve_story_outline,
     create_asset_production_plan,
     create_episode,
     create_keyframe_execution_pack,
     create_keyframe_plan,
     initialize_project,
     record_script_and_storyboard_approval,
+    record_story_outline,
     write_asset_index,
 )
 
@@ -66,11 +68,20 @@ class CodexImageDispatchTests(unittest.TestCase):
             ],
         )
 
+    def approve_outline(self, root: Path, episode_id: str) -> None:
+        record_story_outline(
+            root,
+            episode_id,
+            "## 故事梗概\n\n测试梗概。\n\n## 人物小传\n\n主角保持既有设定。\n\n## 本集大纲\n\n起承转合。",
+        )
+        approve_story_outline(root, episode_id)
+
     def ready_keyframe_episode(self, root: Path) -> None:
         create_episode(root, "EP002", "海滩小螃蟹", "咕噜帮助小螃蟹。", ["咕噜", "泡泡湾"])
         episode = root / "episodes/EP002_海滩小螃蟹"
         (episode / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
         (episode / "storyboard.md").write_text("# 分镜\n", encoding="utf-8")
+        self.approve_outline(root, "EP002")
         record_script_and_storyboard_approval(root, "EP002")
         create_keyframe_plan(
             root,
@@ -125,6 +136,7 @@ class CodexImageDispatchTests(unittest.TestCase):
             root = Path(temp_dir)
             self.seed_project(root)
             create_episode(root, "EP002", "海滩小螃蟹", "小螃蟹回海。", ["小螃蟹"])
+            self.approve_outline(root, "EP002")
 
             plan_path = create_asset_production_plan(
                 root,
@@ -148,6 +160,7 @@ class CodexImageDispatchTests(unittest.TestCase):
             root = Path(temp_dir)
             self.seed_project(root)
             create_episode(root, "EP002", "海滩小螃蟹", "小螃蟹回海。", ["小螃蟹"])
+            self.approve_outline(root, "EP002")
             create_asset_production_plan(
                 root,
                 "EP002",
@@ -165,6 +178,7 @@ class CodexImageDispatchTests(unittest.TestCase):
             root = Path(temp_dir)
             initialize_project(root, "空项目", None)
             create_episode(root, "EP001", "第一集", "还没有图。", ["主角"])
+            self.approve_outline(root, "EP001")
             create_asset_production_plan(
                 root,
                 "EP001",
