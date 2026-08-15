@@ -402,6 +402,8 @@ class AssetMigrationTests(unittest.TestCase):
             record_stage_qa(root, "EP001", end_plan["plan_id"], end_stage["stage_id"], {
                 "status": "uncertain", "reviewer_type": "automated", "checked_at": "2026-08-15T00:05:00Z", "checks": [{"category": "continuity", "status": "uncertain", "confidence": 0.6, "evidence_paths": []}], "issues": [],
             })
+            with self.assertRaisesRegex(ValueError, "不允许准备"):
+                prepare_keyframe_generation(root, "EP001", "01", "end")
             confirmed = record_stage_qa(root, "EP001", end_plan["plan_id"], end_stage["stage_id"], {
                 "status": "pass", "reviewer_type": "user", "checked_at": "2026-08-15T00:06:00Z", "checks": [{"category": "continuity", "status": "pass", "confidence": 1.0, "evidence_paths": []}], "issues": [],
             })
@@ -439,14 +441,42 @@ class AssetMigrationTests(unittest.TestCase):
                 "shot_id": "01", "shot_size": "全景", "camera_movement": "固定", "scene": "广场", "asset_references": [item["reference"] for item in uses], "asset_uses": uses,
                 "start_state": "牵手", "motion": "微笑", "end_state": "牵手", "dialogue": "无", "voice_strategy": "后期", "sound_effects": "无", "transition_in": "切入", "transition_out": "切出", "storyboard_image_prompt": "群像", "frame_prompts": {"start": "群像"}, "frame_specs": {"start": {"continuity_contract": None}},
             }])
+            self.write_file(root, "uploads/first.png", b"first")
+            self.write_file(root, "uploads/second.png", b"second")
+            first_override = register_user_override(root, "EP001", {"path": "uploads/first.png", "role": "background", "scope": "shot", "scope_ids": ["01"]})
+            second_override = register_user_override(root, "EP001", {"path": "uploads/second.png", "role": "background", "scope": "shot", "scope_ids": ["01"]})
+            manifest = json.loads((episode / "keyframe-execution-manifest.json").read_text(encoding="utf-8"))
+            first_record = next(item for item in manifest["user_overrides"] if item["override_id"] == first_override["override_id"])
+            self.assertEqual(first_record["status"], "superseded")
+            self.assertEqual(first_record["superseded_by"], second_override["override_id"])
             needed = prepare_keyframe_generation(root, "EP001", "01", "start")
             self.assertEqual(needed["status"], "reference_board_required")
+            self.assertEqual(needed["applicable_overrides"]["superseded"][0]["superseded_by"], second_override["override_id"])
             self.write_file(root, "provider/board.png", b"board")
             board = record_reference_board(root, "EP001", {"plan_id": needed["plan_id"], "relationship_group": "hold-hands", "output_path": "provider/board.png", "members": members, "layout": "grid", "low_resolution_risk": True})
             self.assertFalse(board["approved"])
             approved = approve_reference_board(root, "EP001", board["board_id"])
             self.assertTrue(approved["approved"])
-            self.assertEqual(prepare_keyframe_generation(root, "EP001", "01", "start")["status"], "planned")
+            plan = prepare_keyframe_generation(root, "EP001", "01", "start")
+            self.assertEqual(plan["status"], "planned")
+            background_stage, board_stage = plan["stages"]
+            self.write_file(root, "provider/background.png", b"background")
+            background_output = record_stage_generation(root, "EP001", plan["plan_id"], background_stage["stage_id"], {
+                "plan_id": plan["plan_id"], "stage_id": background_stage["stage_id"], "tool_request_id": "req-background", "prompt": "背景", "input_images": background_stage["input_images"], "output_path": "provider/background.png", "started_at": "2026-08-15T00:00:00Z", "completed_at": "2026-08-15T00:01:00Z",
+            })
+            record_stage_qa(root, "EP001", plan["plan_id"], background_stage["stage_id"], {
+                "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:02:00Z", "checks": [{"category": "scene", "status": "pass", "confidence": 0.99, "evidence_paths": []}], "issues": [],
+            })
+            self.write_file(root, "provider/frame.png", b"frame")
+            board_inputs = [{"role": "edit_target", "path": background_output["path"], "sha256": background_output["sha256"]}, *board_stage["input_images"][1:]]
+            record_stage_generation(root, "EP001", plan["plan_id"], board_stage["stage_id"], {
+                "plan_id": plan["plan_id"], "stage_id": board_stage["stage_id"], "tool_request_id": "req-board", "prompt": "群像", "input_images": board_inputs, "output_path": "provider/frame.png", "started_at": "2026-08-15T00:03:00Z", "completed_at": "2026-08-15T00:04:00Z",
+            })
+            record_stage_qa(root, "EP001", plan["plan_id"], board_stage["stage_id"], {
+                "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:05:00Z", "checks": [{"category": "character", "status": "pass", "confidence": 0.99, "evidence_paths": []}], "issues": [],
+            })
+            with self.assertRaisesRegex(ValueError, "不允许准备"):
+                prepare_keyframe_generation(root, "EP001", "01", "start")
 
     def test_legacy_execution_manifest_is_marked_and_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

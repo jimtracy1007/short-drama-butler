@@ -1061,6 +1061,21 @@ def _confirmed_anchor(manifest: dict[str, Any], contract: dict[str, Any] | None)
     }
 
 
+def _persist_override_audit(overrides: list[dict[str, Any]], applicable: dict[str, list[dict[str, Any]]]) -> None:
+    """Keep root override records aligned with the scheduler's audit result."""
+    by_id = {item.get("override_id"): item for item in overrides}
+    for winner in applicable.get("effective", []):
+        record = by_id.get(winner.get("override_id"))
+        if record:
+            record["status"] = "active"
+            record.pop("superseded_by", None)
+    for loser in applicable.get("superseded", []):
+        record = by_id.get(loser.get("override_id"))
+        if record:
+            record["status"] = "superseded"
+            record["superseded_by"] = loser["superseded_by"]
+
+
 def prepare_keyframe_generation(
     project_root: Path, episode_id: str, shot_id: str, frame_kind: str
 ) -> dict[str, Any]:
@@ -1074,10 +1089,9 @@ def prepare_keyframe_generation(
     episode_dir = _episode_directory(root, episode_id)
     manifest = _read_v2_manifest(episode_dir)
     shot, frame = _find_frame(manifest, str(shot_id), str(frame_kind))
-    if frame.get("status") == "confirmed":
-        raise ValueError("已确认关键帧不能重新准备；请创建新的关键帧方案")
+    frame_status = frame.get("status")
     prior_plan = frame.get("plans", [])[-1] if frame.get("plans") else None
-    if prior_plan and prior_plan.get("status") == "planned":
+    if frame_status in {"failed", "needs_regeneration"} and prior_plan and prior_plan.get("status") == "planned":
         retryable = [stage for stage in prior_plan.get("stages", []) if stage.get("status") in {"failed", "needs_regeneration"}]
         if retryable:
             retry = retryable[0]
@@ -1089,6 +1103,8 @@ def prepare_keyframe_generation(
                 frame["status"] = "planned"
                 _write_execution_pack(root, episode_dir, manifest)
                 return prior_plan
+    if frame_status not in {"waiting_for_dependency", "planned", "needs_regeneration"}:
+        raise ValueError(f"关键帧当前状态不允许准备生成：{frame_status}")
     contract = frame["frame_spec"]["continuity_contract"]
     anchor = _confirmed_anchor(manifest, contract)
     try:
@@ -1098,6 +1114,7 @@ def prepare_keyframe_generation(
         )
     except KeyframeConsistencyError as error:
         raise ValueError(f"关键帧输入无法准备：{error}") from error
+    _persist_override_audit(manifest.setdefault("user_overrides", []), applicable)
     plan_id = _plan_id(frame, shot["shot_id"])
     try:
         generated = build_generation_plan(
@@ -1339,6 +1356,17 @@ def register_user_override(project_root: Path, episode_id: str, override: dict[s
         "status": "active",
     }
     overrides.append(registered)
+    for existing in overrides:
+        if existing is registered:
+            continue
+        if (
+            existing.get("role") == registered["role"]
+            and existing.get("target_asset_id") == registered["target_asset_id"]
+            and existing.get("scope") == registered["scope"]
+            and existing.get("scope_ids") == registered["scope_ids"]
+        ):
+            existing["status"] = "superseded"
+            existing["superseded_by"] = registered["override_id"]
     _write_execution_pack(root, episode_dir, manifest)
     return registered
 
