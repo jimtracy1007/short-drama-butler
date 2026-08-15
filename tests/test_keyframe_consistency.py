@@ -127,7 +127,7 @@ class KeyframeConsistencyTests(unittest.TestCase):
             "scope_ids": ["01"],
         }
         plan = build_generation_plan("P-background", {"continuity_contract": None}, uses, [override], None, [])
-        inputs = plan["stages"][0]["input_images"]
+        inputs = [item for stage in plan["stages"] for item in stage["input_images"]]
         self.assertEqual([item.get("asset_id") for item in inputs if item["role"] == "background"], [None])
         self.assertEqual([item["asset_id"] for item in inputs if item["role"] == "character_identity"], ["C01"])
 
@@ -213,7 +213,23 @@ class KeyframeConsistencyTests(unittest.TestCase):
             if item.get("role") != "edit_target"
         ]
         self.assertEqual(flattened, ["S01", "S02", "C01", "P01", "C02", "P02"])
-        self.assertEqual([stage["kind"] for stage in plan["stages"]], ["background", "secondary_subjects"])
+        self.assertEqual([stage["kind"] for stage in plan["stages"]], ["background", "primary_subjects", "secondary_subjects"])
+        self.assertEqual(
+            [
+                [item["asset_id"] for item in stage["input_images"] if item.get("role") != "edit_target"]
+                for stage in plan["stages"]
+            ],
+            [["S01", "S02"], ["C01", "P01"], ["C02", "P02"]],
+        )
+
+        optional_secondary = self.required("P03", "prop_identity", subject_tier="secondary")
+        optional_secondary["required"] = False
+        required_subset = [uses[2], uses[3]]
+        plan_with_optional = build_generation_plan("P-phase-optional", {"continuity_contract": None}, required_subset, [], None, [])
+        self.assertEqual(plan_with_optional["stages"][0]["kind"], "background")
+        self.assertEqual(plan_with_optional["stages"][1]["kind"], "primary_subjects")
+        plan_with_optional = build_generation_plan("P-phase-optional", {"continuity_contract": None}, required_subset + [optional_secondary], [], None, [])
+        self.assertEqual([item["asset_id"] for item in plan_with_optional["unselected_optional"]], ["P03"])
 
 
 if __name__ == "__main__":

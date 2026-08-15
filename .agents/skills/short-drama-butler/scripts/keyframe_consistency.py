@@ -393,6 +393,11 @@ def build_generation_plan(
     groups.sort(key=_group_sort_key)
     normalized_groups: list[list[dict[str, Any]]] = []
     for group in groups:
+        # A contact/holding relationship is indivisible.  Its earliest phase
+        # governs every member so it cannot be split merely because one member
+        # is otherwise classified as secondary.
+        group_phase = _group_phase(group)
+        group = [{**item, "schedule_phase": group_phase} for item in group]
         relationship_group = group[0].get("relationship_group")
         capacity = MAX_INPUT_IMAGES if not anchor_input and not normalized_groups else MAX_INPUT_IMAGES - 1
         if relationship_group and len(group) > capacity:
@@ -415,7 +420,7 @@ def build_generation_plan(
                         "board_id": board["board_id"],
                         "relationship_group": relationship_group,
                         "covers_asset_ids": sorted(asset_ids),
-                        "schedule_phase": _group_phase(group),
+                        "schedule_phase": group_phase,
                         "required": True,
                     }
                 ]
@@ -424,20 +429,26 @@ def build_generation_plan(
             normalized_groups.append(group)
 
     stages: list[list[dict[str, Any]]] = []
+    stage_phases: list[int] = []
     for group in normalized_groups:
+        group_phase = _group_phase(group)
         last_stage_capacity = MAX_INPUT_IMAGES if len(stages) == 1 and not anchor_input else MAX_INPUT_IMAGES - 1
-        if stages and len(stages[-1]) + len(group) <= last_stage_capacity:
+        if stages and stage_phases[-1] == group_phase and len(stages[-1]) + len(group) <= last_stage_capacity:
             stages[-1].extend(group)
         else:
             stages.append(list(group))
+            stage_phases.append(group_phase)
 
     if not stages:
         stages = [[]]
+        stage_phases = [0]
     optional_priority = {"continuity": 0, "background": 1, "character_identity": 2, "prop_identity": 3, "reference_board": 5}
     unselected_optional: list[dict[str, Any]] = []
-    for item in sorted(optional, key=lambda candidate: optional_priority.get(candidate["role"], 4)):
+    for item in sorted(optional, key=lambda candidate: (_candidate_phase(candidate), optional_priority.get(candidate["role"], 4))):
         placed = False
         for index, stage in enumerate(stages):
+            if stage_phases[index] != _candidate_phase(item):
+                continue
             capacity = MAX_INPUT_IMAGES if index == 0 and not anchor_input else MAX_INPUT_IMAGES - 1
             if len(stage) < capacity:
                 stage.append(item)
