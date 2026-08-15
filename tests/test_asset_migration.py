@@ -887,6 +887,13 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertIn(heading, readme)
         self.assertNotIn("读取当前项目配置，创建剧情需求、本集状态、素材清单和 Storyboard 交接包", readme)
         self.assertIn("keyframe-execution.md", readme)
+        self.assertIn("codex_image_dispatch.py", readme)
+        self.assertIn("butler.py", readme)
+        self.assertIn("AGENTS.md", readme)
+        skill = (repository_root / "short-drama-butler/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("新对话 / Codex 出图硬规则", skill)
+        self.assertIn("codex_image_dispatch.py", skill)
+        self.assertIn("butler.py", skill)
         for filename in (
             "story-brief.md",
             "episode-assets.md",

@@ -1,0 +1,15 @@
+---
+description: 出图必须先读取已确认素材，禁止纯文生图导致角色漂移
+alwaysApply: true
+---
+
+# 短剧出图必须带参考图
+
+新对话做图时，先读 `AGENTS.md` 和 `short-drama-butler/SKILL.md`，并运行：
+
+```bash
+python short-drama-butler/scripts/butler.py inspect
+python short-drama-butler/scripts/butler.py status
+```
+
+调用任何图片工具之前，必须先跑 `butler.py dispatch-keyframe` 或 `butler.py dispatch-asset`，对返回路径逐张预览，再把这些图当作身份 / 场景 / 风格参考。项目已有确认素材时，禁止只根据文字提示词生成。用户不必提醒你去找 `asset-index.json`。

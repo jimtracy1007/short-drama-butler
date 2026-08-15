@@ -61,6 +61,17 @@ class KeyframeConsistencyTests(unittest.TestCase):
             self.assertIn("side", resolved[0]["fallback_reason"])
             self.assertEqual(resolved[0]["sha256"], hashlib.sha256(b"front").hexdigest())
 
+    def test_scene_with_day_night_views_falls_back_to_registered_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            day = self.write_file(root, "assets/S03-day.png", b"day")
+            self.write_index(root, [self.asset("S03", "泡泡湾", "scenes", [("day", day), ("night", "assets/S03-night.png")])])
+
+            resolved = resolve_keyframe_asset_uses(root, [{"reference": "泡泡湾", "role": "background", "required": True}])
+
+            self.assertEqual(resolved[0]["selected_view"], "day")
+            self.assertIn("standard views unavailable", resolved[0]["fallback_reason"])
+
     def test_ambiguous_reference_and_missing_image_fail_before_planning(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

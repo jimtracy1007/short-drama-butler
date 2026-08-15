@@ -275,4 +275,6 @@ $seedance-storyboard-generator
 
 **会自动生成视频吗？** 不会。它管理故事和素材交接；图片、图生视频和剪辑由你选择的工具完成。
 
+**新开一个 Codex 窗口做图，会不会漂？** 以前会，因为出图默认只吃文字。现在仓库根目录的 `AGENTS.md` 要求任何出图先运行 `short-drama-butler/scripts/butler.py inspect` 和 `status`，再用 `dispatch-keyframe` / `dispatch-asset` 把返回的已有素材图读进当前对话；没有这些参考图就不能生成。建集、生产单、登记素材、确认剧本和记录出图结果也都走同一条 `butler.py`，不要自己拼 Python。`codex_image_dispatch.py` 仍是内部出图适配，但主入口是 `butler.py`。
+
 **换电脑后能保留项目记忆吗？** 公开仓库不会上传你的图片、剧本或连续性记录。需要跨设备或灾备时，请自行把整个项目目录做本地备份、加密归档或保存到你控制的私有存储。

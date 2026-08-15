@@ -84,6 +84,12 @@ def _select_view(asset: dict[str, Any], requested: str | None) -> tuple[dict[str
             if requested and variant != requested:
                 return view, f"requested view '{requested}' unavailable; fell back to '{variant}'"
             return view, None
+    fallback = next(iter(views.values()), None)
+    if fallback:
+        reason = f"standard views unavailable; fell back to '{fallback['variant']}'"
+        if requested:
+            reason = f"requested view '{requested}' unavailable; {reason}"
+        return fallback, reason
     raise KeyframeConsistencyError(f"资产没有可用视图：{asset.get('asset_id', asset.get('name', 'unknown'))}")
 
 

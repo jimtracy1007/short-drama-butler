@@ -39,7 +39,7 @@
 
 剧本/分镜确认和关键帧方案确认仍是两道用户关口。之后才可创建 v2 执行单，并为单帧准备阶段计划。计划每阶段最多 5 张输入；带前序连续性时，确认锚点占唯一 `edit_target` 槽位，其余至多 4 张。required 输入装不下时必须分阶段；不可拆关系组仍超限时，先建立、登记并由用户确认同一计划的参考板，再重新规划。
 
-`prepare_keyframe_generation` 只解析输入和持久化计划，不调用或绑定任何图片、视频、剪辑供应商。外部图片调用方必须先用 `begin_stage_generation` 派发阶段；该函数重新核验输入 SHA-256，冻结计划提示词和输入并返回唯一 `dispatch_id`。生成返回时，`record_stage_generation` 必须收到同一 `dispatch_id`、提示词和输入，才会保存工作图至 `keyframes/work/KF<镜号>-<帧类型>/rNNN-<阶段>.<扩展名>`。每次阶段生成都必须走 `record_stage_qa`：自动 QA 只有该阶段所有 required 类别均通过且每项置信度至少 0.85 才能通过；不确定、低置信度或参考板结果交由用户审核。失败或否决只重做该阶段，并保留旧 revision 和理由。已确认帧需要用户主动重做时使用 `request_keyframe_regeneration`；它让旧计划失效并重新阻塞直接依赖该帧的连续性帧。
+`prepare_keyframe_generation` 只解析输入和持久化计划，不调用或绑定任何图片、视频、剪辑供应商。外部图片调用方必须先用 `butler.py dispatch-keyframe`（或直接调用 `begin_stage_generation`）派发阶段；该函数重新核验输入 SHA-256，冻结计划提示词和输入并返回唯一 `dispatch_id` 与参考图路径。没有参考图路径时禁止调用图片工具。生成返回时，`butler.py record-image` 必须收到同一 `dispatch_id`、提示词和输入，才会保存工作图至 `keyframes/work/KF<镜号>-<帧类型>/rNNN-<阶段>.<扩展名>`。每次阶段生成都必须走 `butler.py record-qa`：自动 QA 只有该阶段所有 required 类别均通过且每项置信度至少 0.85 才能通过；不确定、低置信度或参考板结果交由用户审核。失败或否决只重做该阶段，并保留旧 revision 和理由。已确认帧需要用户主动重做时使用 `butler.py redo-keyframe`；它让旧计划失效并重新阻塞直接依赖该帧的连续性帧。
 
 只有最后阶段 QA 通过，系统才写入 `keyframes/final/KF<镜号>-<帧类型>/rNNN.<扩展名>` 并将它记录为可查询的连续性锚点。新 revision 不覆盖旧文件；确认 revision 通过 manifest 的 `supersedes` / `superseded_by` 保留版本链。v2 不创建新的 `keyframes/pending/`。旧 manifest 无 schema v2 时标记 `legacy_unplanned`，只能查看或人工归档；不得自动生成、迁移、移动或覆盖其 `pending/` 文件或旧执行单。新建 v2 执行单同样拒绝覆盖已有执行单；旧文件必须先人工归档。
 

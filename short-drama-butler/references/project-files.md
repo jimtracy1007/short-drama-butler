@@ -5,6 +5,7 @@
 ## 目录地图
 
 ```text
+AGENTS.md                         新对话总控：出图前必须读取已有素材
 project-settings/                 项目长期记忆
 source-material/                  导入前的原始资料
 assets/                           已确认、可在画面中使用的图片
@@ -12,6 +13,10 @@ episodes/EP001_剧集名/            单集工作资料
 references/user/                  用户提供、已登记的关键帧维度覆盖图
 references/boards/                已登记的关系组参考板
 templates/                        新建资料时使用的模板
+short-drama-butler/scripts/butler.py
+                                  统一 CLI：status / init / new-episode / plan-assets / dispatch-* / record-*
+short-drama-butler/scripts/codex_image_dispatch.py
+                                  出图适配（butler.py 内部调用）：inspect / dispatch-keyframe / dispatch-asset
 ```
 
 ## 项目长期记忆
@@ -106,7 +111,7 @@ keyframe-execution.md：继承完整分镜 + 补帧图文件
 
 每帧的 `frame_spec` 必须有明确的 `continuity_contract`。无承接时为 `null`；有承接时只可引用精确的已确认前序帧，并列出要继承的空间、人物身份、道具身份或构图维度。前序帧尚未确认时，计划保持 `waiting_for_dependency`，不进入图片调用。
 
-剧本/分镜确认和关键帧方案确认仍是两道必经用户关口。之后 `prepare_keyframe_generation` 才能为一个帧图建立计划；每阶段最多 5 张输入，required 输入不能被裁剪。该步骤只做本地解析和计划，不绑定或调用任何图片、视频、剪辑平台。实际调用方必须使用已批准输入，并通过 `record_stage_generation` 记录结果；它先验证输入路径与 SHA-256，再归档到 `keyframes/work/` 的递增 revision。
+剧本/分镜确认和关键帧方案确认仍是两道必经用户关口。之后 `prepare_keyframe_generation` 才能为一个帧图建立计划；每阶段最多 5 张输入，required 输入不能被裁剪。该步骤只做本地解析和计划，不绑定或调用任何图片、视频、剪辑平台。Codex 必须先运行 `short-drama-butler/scripts/butler.py dispatch-keyframe`，把派发单中的参考图读进当前对话后再出图；没有参考图时禁止纯文生图。实际调用方必须使用已批准输入，并通过 `butler.py record-image` 记录结果；它先验证输入路径与 SHA-256，再归档到 `keyframes/work/` 的递增 revision。
 
 每个阶段随后必须记录 QA。自动 QA 只有全部检查项为通过、且每项置信度至少 0.85 时才可通过；不确定、低置信度和使用参考板的结果均须用户审核。失败或否决只重做该阶段；最后阶段通过才将图片复制到 `keyframes/final/` 作为确认 revision 和连续性锚点。工作图、确认图和 Markdown 中显示的当前确认路径都由同一 manifest 更新，不覆盖旧文件。
 
