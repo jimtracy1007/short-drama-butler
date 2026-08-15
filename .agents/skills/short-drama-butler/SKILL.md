@@ -22,7 +22,7 @@ description: Use when initializing, organizing, migrating, or maintaining an AI 
 | 创建一集 | 创建剧情需求、本集状态、素材清单与交接包。 |
 | 生产本集资产 | 在大纲确认后，生成 `asset-production-plan.md` 和出图提示词；确认图片后再登记资产。 |
 | 审核剧本与分镜 | 展示正式剧本和分镜，等待用户确认或按反馈修改；未经确认不得规划关键帧。 |
-| 规划 / 生成关键帧 | 逐镜列出首帧、尾帧、过程帧的数量和用途，等待用户确认方案后才使用图片工具出图。 |
+| 规划 / 生成关键帧 | 逐镜列出首帧、尾帧、过程帧的数量和用途；方案确认后建立 v2 执行单、逐阶段规划并记录实际出图与质检结果。 |
 | 结束一集 / 继续下一集 | 本集定稿后确认连续性记录；创建下一集时自动继承最近一份已确认记录。 |
 | 交给分镜 | 生成/更新 `storyboard-package.md`，随后调用 `$seedance-storyboard-generator`。 |
 | 审核/提升素材 | 确认剧集素材可跨集复用后，迁入全局库并更新索引。 |
@@ -75,7 +75,17 @@ description: Use when initializing, organizing, migrating, or maintaining an AI 
 
 随后按导演版分镜创建 `keyframe-plan.md`：5 秒或余数镜头固定 `start_only`；10 秒镜头固定 `start_end`。只有要表现不可省略中间状态的 10 秒镜头才能提议 `start_middle_end`，且必须写 `exception_reason`。展示方案时，将每个三帧例外单独问清“是否保留过程帧”；调用 `approve_keyframe_plan` 时仅把用户明确同意的镜号写入 `approved_middle_shot_ids`。未列入该参数的例外自动降为两帧。只有 `assert_keyframe_generation_allowed` 成功时才可生成关键帧。多帧的价值来自清晰的阶段差异和工具支持，不得用近似重复图凑数量；同一镜的图片应明确标注为首 / 过程 / 尾帧，便于交给图生视频工具。
 
-关键帧执行阶段调用 `create_keyframe_execution_pack`。它从已确认分镜逐镜建立 `keyframe-execution.md`：保留时长、镜头语言、画面三阶段、台词、声音策略、音效、入点、出点 / 转场、按名称的素材参考和原分镜出图提示词；只新增 `KF<镜号>-start/middle/end.png` 文件以及对应帧图提示词，并合成可复制的视频生成提示词。不得把它降级为一句动作说明。详细字段见 [references/storyboard-to-keyframes.md](references/storyboard-to-keyframes.md)。
+关键帧执行阶段调用 `create_keyframe_execution_pack`。它从已确认分镜逐镜建立 `keyframe-execution.md` 和 schema v2 的 `keyframe-execution-manifest.json`：保留时长、镜头语言、画面三阶段、台词、声音策略、音效、入点、出点 / 转场、按名称的素材参考和原分镜出图提示词；Markdown 只展示当前确认版，JSON 保存逐阶段输入、哈希、质检和版本历史。不得把它降级为一句动作说明。详细字段见 [references/storyboard-to-keyframes.md](references/storyboard-to-keyframes.md)。
+
+创建 v2 执行单时，每镜除了人可读的 `asset_references`，还必须给出结构化 `asset_uses`。每项以用户可说的资产 ID、名称或别名作为 `reference`，并明确 `role`（仅 `background`、`character_identity`、`prop_identity`、`lighting`、`composition`、`style`）、`required`，需要时再给 `view_hint` / `facing`、`relationship_group` 和连续性标记。系统将名称或别名解析为唯一的内部资产 ID、已登记视图、项目内相对路径和 SHA-256；名称歧义、未登记素材、缺图或无可用视图时停止该帧，不能猜测或删掉 required 素材。`frame_spec` 还必须明确 `continuity_contract`：没有承接关系时写 `null`；有承接关系时精确指定前序镜号/帧、继承维度和资产 ID，不能从自然语言推断。
+
+用户继续只说名称，不需要输入内部 ID。若用户为某一镜或连续段提供额外参考图，先询问其约束的维度和范围；使用 `register_user_override` 将项目内图片复制到 `references/user/` 并记录 SHA-256。人物身份或道具身份覆盖必须指定唯一 `target_asset_id`；范围只能是单镜、明确镜号列表的连续段或整集。覆盖只替换声明维度，按单镜优先于连续段优先于整集、同范围较新优先；被替代项保留为 `superseded`，不改写资产索引或角色圣经。
+
+调用 `prepare_keyframe_generation` 后，才会为一张帧图保存最多 5 张输入的阶段计划。带连续性合同的帧必须等待前序帧已确认；不可拆的关系组无法装入 5 图时，先登记并由用户确认同一计划的参考板，再重新规划。此函数只准备本地计划，**不调用任何图片、视频或剪辑供应商**。图片调用适配层只能使用已批准阶段的提示词和输入路径，并把返回数据交给 `record_stage_generation`；该函数核对实际输入和哈希后，将产图写为不可覆盖的工作版本：`episodes/<集>/keyframes/work/KF<镜号>-<帧类型>/rNNN-<阶段>.<扩展名>`。
+
+每次生成后，使用 `record_stage_qa` 写入结构化质检。自动质检只有在每项检查均通过且置信度不低于 0.85 时才可通过；不确定、低置信度或参考板参与的结果必须转给用户审核。质检失败或用户否决时，只重做出错阶段并递增 revision，保留旧图和理由。最后阶段通过后，系统才写入确认版本 `episodes/<集>/keyframes/final/KF<镜号>-<帧类型>/rNNN.<扩展名>`；该确认帧可成为同镜后续帧或精确指定的连续镜头锚点。
+
+v2 不创建新的 `keyframes/pending/` 目录。旧执行单缺少 `schema_version: 2` 时标记为 `legacy_unplanned`，仅可查看和人工归档；禁止自动出图、自动迁移、移动或覆盖任何旧 `keyframes/pending/` 文件或旧 Markdown。唯一迁移方式是从已确认分镜重新创建 v2 执行单。
 
 交接包模板和必含字段见 [references/storyboard-handoff.md](references/storyboard-handoff.md)。
 与 Seedance Storyboard Generator 或其他分镜 Skill 的覆盖规则见 [references/seedance-integration-protocol.md](references/seedance-integration-protocol.md)。
