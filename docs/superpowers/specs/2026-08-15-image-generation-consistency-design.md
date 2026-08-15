@@ -146,7 +146,7 @@ prepare_keyframe_generation（解析资产、等待或解析连续性锚点、�
 - 同一阶段重做递增其 revision；旧文件仍保留并由 manifest 的 `supersedes` / `superseded_by` 关联。
 - `keyframe-execution.md` 展示当前确认版路径；JSON 保存全历史，二者由同一写入函数原子更新。
 
-旧 manifest 无 `schema_version` 或版本低于 2 时标记 `legacy_unplanned`，只允许查看与人工归档，禁止自动出图。唯一迁移方式是从已确认分镜重新创建 v2 执行单；旧 `keyframes/pending/` 文件和 Markdown 原样保留，不自动移动或覆盖。
+旧 manifest 无 `schema_version` 或版本低于 2 时标记 `legacy_unplanned`，只允许查看与人工归档，禁止自动出图。创建函数拒绝覆盖任何已有执行单；人工归档旧执行单后，才可从已确认分镜创建新的 v2 执行单。旧 `keyframes/pending/` 文件和 Markdown 原样保留，不自动移动或覆盖。
 
 ## 调度算法与 5 图硬约束
 
@@ -194,7 +194,7 @@ prepare_keyframe_generation（解析资产、等待或解析连续性锚点、�
 阶段：generated → needs_regeneration → planned；generating → failed → planned
 ```
 
-图片调用 adapter 只在 `planned → generating → generated` 期间返回实际输入图、用途、SHA-256、提示词、时间、产图路径和调用结果；`record_stage_generation` 校验并写入这些数据。adapter 不得把图片标为 confirmed。
+图片调用 adapter 必须先通过 `begin_stage_generation` 取得并持久化唯一 `dispatch_id`，该函数重新校验全部输入 SHA-256 并冻结提示词与输入。adapter 只在 `planned → generating → generated` 期间返回该 `dispatch_id` 对应的实际输入图、用途、SHA-256、提示词、时间、产图路径和调用结果；`record_stage_generation` 校验并写入这些数据。adapter 不得把图片标为 confirmed。
 
 视觉质检 adapter 必须返回：
 
@@ -212,7 +212,7 @@ prepare_keyframe_generation（解析资产、等待或解析连续性锚点、�
 }
 ```
 
-检查类别固定为 `character`、`scene`、`prop` 和 `continuity`。自动 QA 仅在每项 required 检查均为 pass 且置信度不低于 0.85 时，才由 `record_stage_qa` 写为 `qa_passed`；若它是最后阶段，该函数同时将帧从 `generating` 写为 `confirmed`。任何未知、低置信度、参考板使用或无法判断的项都转 `pending_review`。用户审核可确认或否决：确认后由同一函数将阶段写为 `qa_passed`，并在最后阶段确认帧；否决后写入原因并只重做出错阶段。失败必须使用明确代码，例如 `prop_color_drift`、`character_feature_missing`、`scene_orientation_flip`。
+检查类别固定为 `character`、`scene`、`prop` 和 `continuity`。自动 QA 仅在该阶段所有 required 类别均为 pass 且置信度不低于 0.85 时，才由 `record_stage_qa` 写为 `qa_passed`；若它是最后阶段，该函数同时将帧从 `generating` 写为 `confirmed`。任何未知、低置信度、参考板使用或无法判断的项都转 `pending_review`。用户审核可确认或否决：确认后由同一函数将阶段写为 `qa_passed`，并在最后阶段确认帧；否决后写入原因并只重做出错阶段。已确认帧的主动重做必须调用 `request_keyframe_regeneration`，它保留旧计划审计、失效其直接连续性依赖帧，并要求新锚点确认后才可重排下游。失败必须使用明确代码，例如 `prop_color_drift`、`character_feature_missing`、`scene_orientation_flip`。
 
 ## 错误处理
 

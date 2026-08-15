@@ -81,11 +81,11 @@ description: Use when initializing, organizing, migrating, or maintaining an AI 
 
 用户继续只说名称，不需要输入内部 ID。若用户为某一镜或连续段提供额外参考图，先询问其约束的维度和范围；使用 `register_user_override` 将项目内图片复制到 `references/user/` 并记录 SHA-256。人物身份或道具身份覆盖必须指定唯一 `target_asset_id`；范围只能是单镜、明确镜号列表的连续段或整集。覆盖只替换声明维度，按单镜优先于连续段优先于整集、同范围较新优先；被替代项保留为 `superseded`，不改写资产索引或角色圣经。
 
-调用 `prepare_keyframe_generation` 后，才会为一张帧图保存最多 5 张输入的阶段计划。带连续性合同的帧必须等待前序帧已确认；不可拆的关系组无法装入 5 图时，先登记并由用户确认同一计划的参考板，再重新规划。此函数只准备本地计划，**不调用任何图片、视频或剪辑供应商**。图片调用适配层只能使用已批准阶段的提示词和输入路径，并把返回数据交给 `record_stage_generation`；该函数核对实际输入和哈希后，将产图写为不可覆盖的工作版本：`episodes/<集>/keyframes/work/KF<镜号>-<帧类型>/rNNN-<阶段>.<扩展名>`。
+调用 `prepare_keyframe_generation` 后，才会为一张帧图保存最多 5 张输入的阶段计划。带连续性合同的帧必须等待前序帧已确认；不可拆的关系组无法装入 5 图时，先登记并由用户确认同一计划的参考板，再重新规划。此函数只准备本地计划，**不调用任何图片、视频或剪辑供应商**。适配层必须先调用 `begin_stage_generation`：它重算每张输入的 SHA-256、冻结提示词与输入并将阶段写为 `generating`，返回唯一的 `dispatch_id`。随后适配层只能把该 dispatch 原样交给图片工具，并把带相同 `dispatch_id` 的返回数据交给 `record_stage_generation`；后者核对提示词、实际输入和哈希后，才将产图写为不可覆盖的工作版本：`episodes/<集>/keyframes/work/KF<镜号>-<帧类型>/rNNN-<阶段>.<扩展名>`。
 
-每次生成后，使用 `record_stage_qa` 写入结构化质检。自动质检只有在每项检查均通过且置信度不低于 0.85 时才可通过；不确定、低置信度或参考板参与的结果必须转给用户审核。质检失败或用户否决时，只重做出错阶段并递增 revision，保留旧图和理由。最后阶段通过后，系统才写入确认版本 `episodes/<集>/keyframes/final/KF<镜号>-<帧类型>/rNNN.<扩展名>`；该确认帧可成为同镜后续帧或精确指定的连续镜头锚点。
+每次生成后，使用 `record_stage_qa` 写入结构化质检。自动质检只有在该阶段所有 required 类别均通过且置信度不低于 0.85 时才可通过；不确定、低置信度或参考板参与的结果必须转给用户审核。质检失败或用户否决时，只重做出错阶段并递增 revision，保留旧图和理由。需要用户主动重做已确认帧时调用 `request_keyframe_regeneration`；它保留历史、废止旧计划，并将直接连续性依赖帧重新阻塞，直到新锚点确认。最后阶段通过后，系统才写入确认版本 `episodes/<集>/keyframes/final/KF<镜号>-<帧类型>/rNNN.<扩展名>`；该确认帧可成为同镜后续帧或精确指定的连续镜头锚点。
 
-v2 不创建新的 `keyframes/pending/` 目录。旧执行单缺少 `schema_version: 2` 时标记为 `legacy_unplanned`，仅可查看和人工归档；禁止自动出图、自动迁移、移动或覆盖任何旧 `keyframes/pending/` 文件或旧 Markdown。唯一迁移方式是从已确认分镜重新创建 v2 执行单。
+v2 不创建新的 `keyframes/pending/` 目录。旧执行单缺少 `schema_version: 2` 时标记为 `legacy_unplanned`，仅可查看和人工归档；禁止自动出图、自动迁移、移动或覆盖任何旧 `keyframes/pending/` 文件或旧 Markdown。创建函数也会拒绝覆盖任何已有执行单；需要进入 v2 时，先人工归档旧执行单，再从已确认分镜创建新的 v2 执行单。
 
 交接包模板和必含字段见 [references/storyboard-handoff.md](references/storyboard-handoff.md)。
 与 Seedance Storyboard Generator 或其他分镜 Skill 的覆盖规则见 [references/seedance-integration-protocol.md](references/seedance-integration-protocol.md)。

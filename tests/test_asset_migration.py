@@ -27,10 +27,12 @@ from project_files import (  # noqa: E402
     create_episode,
     create_keyframe_execution_pack,
     create_keyframe_plan,
+    begin_stage_generation,
     initialize_project,
     prepare_keyframe_generation,
     record_stage_generation,
     record_stage_qa,
+    request_keyframe_regeneration,
     register_user_override,
     record_reference_board,
     approve_reference_board,
@@ -383,25 +385,37 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertEqual(waiting["status"], "waiting_for_dependency")
             start_plan = prepare_keyframe_generation(root, "EP001", "01", "start")
             stage = start_plan["stages"][0]
+            original_asset = (root / "assets/S01.png").read_bytes()
+            (root / "assets/S01.png").write_bytes(b"tampered")
+            with self.assertRaisesRegex(ValueError, "哈希不匹配"):
+                begin_stage_generation(root, "EP001", start_plan["plan_id"], stage["stage_id"])
+            (root / "assets/S01.png").write_bytes(original_asset)
+            start_dispatch = begin_stage_generation(root, "EP001", start_plan["plan_id"], stage["stage_id"])
             self.write_file(root, "provider/start.png", b"start-result")
+            with self.assertRaisesRegex(ValueError, "prompt"):
+                record_stage_generation(root, "EP001", start_plan["plan_id"], stage["stage_id"], {
+                    "plan_id": start_plan["plan_id"], "stage_id": stage["stage_id"], "dispatch_id": start_dispatch["dispatch_id"], "tool_request_id": "req-wrong-prompt", "prompt": "私自改写的提示词", "input_images": start_dispatch["input_images"], "output_path": "provider/start.png", "started_at": "2026-08-15T00:00:00Z", "completed_at": "2026-08-15T00:01:00Z",
+                })
             generation = record_stage_generation(root, "EP001", start_plan["plan_id"], stage["stage_id"], {
-                "plan_id": start_plan["plan_id"], "stage_id": stage["stage_id"], "tool_request_id": "req-start", "prompt": "海浪靠岸", "input_images": stage["input_images"], "output_path": "provider/start.png", "started_at": "2026-08-15T00:00:00Z", "completed_at": "2026-08-15T00:01:00Z",
+                "plan_id": start_plan["plan_id"], "stage_id": stage["stage_id"], "dispatch_id": start_dispatch["dispatch_id"], "tool_request_id": "req-start", "prompt": start_dispatch["prompt"], "input_images": start_dispatch["input_images"], "output_path": "provider/start.png", "started_at": "2026-08-15T00:00:00Z", "completed_at": "2026-08-15T00:01:00Z",
             })
             self.assertTrue(generation["path"].startswith("episodes/EP001_测试集/keyframes/work/KF01-start/r001-"))
             record_stage_qa(root, "EP001", start_plan["plan_id"], stage["stage_id"], {
                 "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:02:00Z", "checks": [{"category": "scene", "status": "pass", "confidence": 0.9, "evidence_paths": []}], "issues": [],
             })
-            # Simulate a subsequent, recorded regeneration decision and confirm
-            # a second final revision through the same public state APIs.
+            # A user-authorized public regeneration retains the first revision
+            # and invalidates any downstream continuity anchor.
             manifest_path = episode / "keyframe-execution-manifest.json"
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest["shots"][0]["frames"][0]["status"] = "needs_regeneration"
-            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            redo = request_keyframe_regeneration(root, "EP001", "01", "start", "海浪形状需要修正")
+            self.assertEqual(redo["invalidated_dependents"], [{"shot_id": "01", "frame_kind": "end"}])
             replacement_plan = prepare_keyframe_generation(root, "EP001", "01", "start")
+            with self.assertRaisesRegex(ValueError, "新版计划"):
+                begin_stage_generation(root, "EP001", start_plan["plan_id"], stage["stage_id"])
             replacement_stage = replacement_plan["stages"][0]
+            replacement_dispatch = begin_stage_generation(root, "EP001", replacement_plan["plan_id"], replacement_stage["stage_id"])
             self.write_file(root, "provider/start-r002.png", b"start-replacement")
             record_stage_generation(root, "EP001", replacement_plan["plan_id"], replacement_stage["stage_id"], {
-                "plan_id": replacement_plan["plan_id"], "stage_id": replacement_stage["stage_id"], "tool_request_id": "req-start-r002", "prompt": "海浪靠岸，修订版", "input_images": replacement_stage["input_images"], "output_path": "provider/start-r002.png", "started_at": "2026-08-15T00:02:30Z", "completed_at": "2026-08-15T00:03:00Z",
+                "plan_id": replacement_plan["plan_id"], "stage_id": replacement_stage["stage_id"], "dispatch_id": replacement_dispatch["dispatch_id"], "tool_request_id": "req-start-r002", "prompt": replacement_dispatch["prompt"], "input_images": replacement_dispatch["input_images"], "output_path": "provider/start-r002.png", "started_at": "2026-08-15T00:02:30Z", "completed_at": "2026-08-15T00:03:00Z",
             })
             record_stage_qa(root, "EP001", replacement_plan["plan_id"], replacement_stage["stage_id"], {
                 "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:03:30Z", "checks": [{"category": "scene", "status": "pass", "confidence": 0.95, "evidence_paths": []}], "issues": [],
@@ -416,9 +430,10 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertEqual(end_plan["status"], "planned")
             end_stage = end_plan["stages"][0]
             self.assertEqual(end_stage["input_images"][0]["role"], "edit_target")
+            end_dispatch = begin_stage_generation(root, "EP001", end_plan["plan_id"], end_stage["stage_id"])
             self.write_file(root, "provider/end.png", b"end-result")
             record_stage_generation(root, "EP001", end_plan["plan_id"], end_stage["stage_id"], {
-                "plan_id": end_plan["plan_id"], "stage_id": end_stage["stage_id"], "tool_request_id": "req-end", "prompt": "浪花退去", "input_images": end_stage["input_images"], "output_path": "provider/end.png", "started_at": "2026-08-15T00:03:00Z", "completed_at": "2026-08-15T00:04:00Z",
+                "plan_id": end_plan["plan_id"], "stage_id": end_stage["stage_id"], "dispatch_id": end_dispatch["dispatch_id"], "tool_request_id": "req-end", "prompt": end_dispatch["prompt"], "input_images": end_dispatch["input_images"], "output_path": "provider/end.png", "started_at": "2026-08-15T00:03:00Z", "completed_at": "2026-08-15T00:04:00Z",
             })
             record_stage_qa(root, "EP001", end_plan["plan_id"], end_stage["stage_id"], {
                 "status": "uncertain", "reviewer_type": "automated", "checked_at": "2026-08-15T00:05:00Z", "checks": [{"category": "continuity", "status": "uncertain", "confidence": 0.6, "evidence_paths": []}], "issues": [],
@@ -436,6 +451,68 @@ class AssetMigrationTests(unittest.TestCase):
             override = register_user_override(root, "EP001", {"path": "uploads/beach.png", "role": "background", "scope": "shot", "scope_ids": ["01"]})
             self.assertTrue((root / override["path"]).is_file())
             self.assertEqual(override["role"], "background")
+
+    def test_ep002_uses_names_to_complete_a_v2_keyframe_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None)
+            self.write_file(root, "assets/S01.png", b"beach")
+            self.write_file(root, "assets/C01.png", b"crab")
+            self.write_file(root, "assets/P01.png", b"shell")
+            write_asset_index(root, [
+                {"asset_id": "S01", "name": "海滩", "aliases": ["金色沙滩"], "kind": "scenes", "scope": "global", "destination": "assets/S01.png", "views": [{"variant": "wide", "path": "assets/S01.png"}]},
+                {"asset_id": "C01", "name": "咕噜", "aliases": ["小螃蟹"], "kind": "characters", "scope": "global", "destination": "assets/C01.png", "views": [{"variant": "front", "path": "assets/C01.png"}]},
+                {"asset_id": "P01", "name": "彩纹贝壳", "kind": "props", "scope": "global", "destination": "assets/P01.png", "views": [{"variant": "reference", "path": "assets/P01.png"}]},
+            ])
+            create_episode(root, "EP002", "海滩小螃蟹", "咕噜找到彩纹贝壳。", [])
+            episode = root / "episodes/EP002_海滩小螃蟹"
+            (episode / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
+            (episode / "storyboard.md").write_text("# 分镜\n", encoding="utf-8")
+            record_script_and_storyboard_approval(root, "EP002")
+            create_keyframe_plan(root, "EP002", [{"shot_id": "01", "duration_seconds": 5, "action": "咕噜举起贝壳", "strategy": "start_only"}])
+            approve_keyframe_plan(root, "EP002")
+            create_keyframe_execution_pack(root, "EP002", [{
+                "shot_id": "01", "shot_size": "中景", "camera_movement": "固定", "scene": "金色沙滩",
+                "asset_references": ["金色沙滩", "小螃蟹", "彩纹贝壳"],
+                "asset_uses": [
+                    {"reference": "金色沙滩", "role": "background", "required": True},
+                    {"reference": "小螃蟹", "role": "character_identity", "required": True, "subject_tier": "primary"},
+                    {"reference": "彩纹贝壳", "role": "prop_identity", "required": True, "subject_tier": "primary"},
+                ],
+                "start_state": "咕噜发现贝壳", "motion": "举起贝壳", "end_state": "咕噜微笑", "dialogue": "哇，好漂亮！", "voice_strategy": "后期配音", "sound_effects": "海浪", "transition_in": "淡入", "transition_out": "淡出", "storyboard_image_prompt": "儿童 3D 海滩",
+                "frame_prompts": {"start": "儿童 3D 动画，咕噜在金色沙滩举起彩纹贝壳。"},
+                "frame_specs": {"start": {"continuity_contract": None, "allowed_changes": ["咕噜举起贝壳"], "invariants": ["海滩、咕噜和贝壳身份"]}},
+            }])
+            plan = prepare_keyframe_generation(root, "EP002", "01", "start")
+            background_stage, subject_stage = plan["stages"]
+            self.assertEqual(set(background_stage["required_qa_categories"]), {"scene"})
+            self.assertEqual(set(subject_stage["required_qa_categories"]), {"character", "continuity", "prop"})
+            background_dispatch = begin_stage_generation(root, "EP002", plan["plan_id"], background_stage["stage_id"])
+            self.write_file(root, "provider/ep002-background.png", b"ep002-background")
+            record_stage_generation(root, "EP002", plan["plan_id"], background_stage["stage_id"], {
+                "plan_id": plan["plan_id"], "stage_id": background_stage["stage_id"], "dispatch_id": background_dispatch["dispatch_id"], "tool_request_id": "req-ep002-background", "prompt": background_dispatch["prompt"], "input_images": background_dispatch["input_images"], "output_path": "provider/ep002-background.png", "started_at": "2026-08-15T01:00:00Z", "completed_at": "2026-08-15T01:01:00Z",
+            })
+            record_stage_qa(root, "EP002", plan["plan_id"], background_stage["stage_id"], {
+                "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T01:02:00Z",
+                "checks": [{"category": "scene", "status": "pass", "confidence": 0.95, "evidence_paths": []}], "issues": [],
+            })
+            subject_dispatch = begin_stage_generation(root, "EP002", plan["plan_id"], subject_stage["stage_id"])
+            self.write_file(root, "provider/ep002-subjects.png", b"ep002-subjects")
+            record_stage_generation(root, "EP002", plan["plan_id"], subject_stage["stage_id"], {
+                "plan_id": plan["plan_id"], "stage_id": subject_stage["stage_id"], "dispatch_id": subject_dispatch["dispatch_id"], "tool_request_id": "req-ep002-subjects", "prompt": subject_dispatch["prompt"], "input_images": subject_dispatch["input_images"], "output_path": "provider/ep002-subjects.png", "started_at": "2026-08-15T01:03:00Z", "completed_at": "2026-08-15T01:04:00Z",
+            })
+            record_stage_qa(root, "EP002", plan["plan_id"], subject_stage["stage_id"], {
+                "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T01:05:00Z",
+                "checks": [
+                    {"category": "character", "status": "pass", "confidence": 0.95, "evidence_paths": []},
+                    {"category": "prop", "status": "pass", "confidence": 0.95, "evidence_paths": []},
+                    {"category": "continuity", "status": "pass", "confidence": 0.95, "evidence_paths": []},
+                ], "issues": [],
+            })
+            manifest = json.loads((episode / "keyframe-execution-manifest.json").read_text(encoding="utf-8"))
+            frame = manifest["shots"][0]["frames"][0]
+            self.assertEqual(frame["status"], "confirmed")
+            self.assertTrue((root / frame["confirmed_revision"]["path"]).is_file())
 
     def test_v2_reference_board_requires_registration_and_user_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -481,17 +558,18 @@ class AssetMigrationTests(unittest.TestCase):
             plan = prepare_keyframe_generation(root, "EP001", "01", "start")
             self.assertEqual(plan["status"], "planned")
             background_stage, board_stage = plan["stages"]
+            background_dispatch = begin_stage_generation(root, "EP001", plan["plan_id"], background_stage["stage_id"])
             self.write_file(root, "provider/background.png", b"background")
             background_output = record_stage_generation(root, "EP001", plan["plan_id"], background_stage["stage_id"], {
-                "plan_id": plan["plan_id"], "stage_id": background_stage["stage_id"], "tool_request_id": "req-background", "prompt": "背景", "input_images": background_stage["input_images"], "output_path": "provider/background.png", "started_at": "2026-08-15T00:00:00Z", "completed_at": "2026-08-15T00:01:00Z",
+                "plan_id": plan["plan_id"], "stage_id": background_stage["stage_id"], "dispatch_id": background_dispatch["dispatch_id"], "tool_request_id": "req-background", "prompt": background_dispatch["prompt"], "input_images": background_dispatch["input_images"], "output_path": "provider/background.png", "started_at": "2026-08-15T00:00:00Z", "completed_at": "2026-08-15T00:01:00Z",
             })
             record_stage_qa(root, "EP001", plan["plan_id"], background_stage["stage_id"], {
                 "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:02:00Z", "checks": [{"category": "scene", "status": "pass", "confidence": 0.99, "evidence_paths": []}], "issues": [],
             })
             self.write_file(root, "provider/frame.png", b"frame")
-            board_inputs = [{"role": "edit_target", "path": background_output["path"], "sha256": background_output["sha256"]}, *board_stage["input_images"][1:]]
+            board_dispatch = begin_stage_generation(root, "EP001", plan["plan_id"], board_stage["stage_id"])
             record_stage_generation(root, "EP001", plan["plan_id"], board_stage["stage_id"], {
-                "plan_id": plan["plan_id"], "stage_id": board_stage["stage_id"], "tool_request_id": "req-board", "prompt": "群像", "input_images": board_inputs, "output_path": "provider/frame.png", "started_at": "2026-08-15T00:03:00Z", "completed_at": "2026-08-15T00:04:00Z",
+                "plan_id": plan["plan_id"], "stage_id": board_stage["stage_id"], "dispatch_id": board_dispatch["dispatch_id"], "tool_request_id": "req-board", "prompt": board_dispatch["prompt"], "input_images": board_dispatch["input_images"], "output_path": "provider/frame.png", "started_at": "2026-08-15T00:03:00Z", "completed_at": "2026-08-15T00:04:00Z",
             })
             record_stage_qa(root, "EP001", plan["plan_id"], board_stage["stage_id"], {
                 "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:05:00Z", "checks": [{"category": "character", "status": "pass", "confidence": 0.99, "evidence_paths": []}], "issues": [],

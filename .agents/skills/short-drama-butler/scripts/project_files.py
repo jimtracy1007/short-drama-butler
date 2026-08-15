@@ -739,8 +739,10 @@ def _read_v2_manifest(episode_dir: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError("本集尚未创建关键帧执行单")
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version", 0) >= 2:
+    if manifest.get("schema_version") == 2:
         return manifest
+    if isinstance(manifest.get("schema_version"), int) and manifest["schema_version"] > 2:
+        raise ValueError("关键帧执行单 schema_version 高于本工具支持版本；拒绝读取或改写")
     # A legacy pack is intentionally not inferred or silently upgraded.  The
     # marker makes the block visible while preserving the original shot data.
     manifest["status"] = "legacy_unplanned"
@@ -774,6 +776,32 @@ def _find_plan(manifest: dict[str, Any], plan_id: str) -> tuple[dict[str, Any], 
                 if plan.get("plan_id") == plan_id:
                     return shot, frame, plan
     raise ValueError(f"执行单不存在计划：{plan_id}")
+
+
+def _require_current_plan(frame: dict[str, Any], plan: dict[str, Any]) -> None:
+    """Reject stale plan revisions before a side-effecting transition."""
+    if frame.get("current_plan_id") != plan.get("plan_id"):
+        raise ValueError("该计划已被新版计划取代，不能继续执行或质检")
+
+
+def _supersede_runnable_plans(frame: dict[str, Any], replacement_plan_id: str) -> None:
+    """Make at most one plan runnable, while retaining all audit history."""
+    for plan in frame.get("plans", []):
+        if plan.get("plan_id") == replacement_plan_id:
+            continue
+        if plan.get("status") in {"planned", "waiting_for_dependency", "reference_board_required"}:
+            plan["status"] = "superseded"
+            plan["superseded_by"] = replacement_plan_id
+    frame["current_plan_id"] = replacement_plan_id
+
+
+def _invalidate_frame_plans(frame: dict[str, Any], reason: str) -> None:
+    """Retain audit history but make every previous plan non-runnable."""
+    for plan in frame.get("plans", []):
+        if plan.get("status") not in {"superseded", "invalidated"}:
+            plan["status"] = "invalidated"
+            plan["invalidated_reason"] = reason
+    frame["current_plan_id"] = None
 
 
 def _stage(plan: dict[str, Any], stage_id: str) -> dict[str, Any]:
@@ -957,6 +985,12 @@ def create_keyframe_execution_pack(
     root = project_root.resolve()
     episode_dir = _episode_directory(root, episode_id)
     assert_keyframe_generation_allowed(root, episode_id)
+    existing_manifest = _manifest_path(episode_dir)
+    existing_execution = episode_dir / "keyframe-execution.md"
+    if existing_manifest.exists() or existing_execution.exists():
+        raise FileExistsError(
+            "本集已存在关键帧执行单；为保护 legacy/v2 审计历史，拒绝重新创建或覆盖"
+        )
     manifest_path = episode_dir / "keyframe-manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError("本集尚未创建关键帧方案")
@@ -993,6 +1027,7 @@ def create_keyframe_execution_pack(
                         {"source": "confirmed_predecessor", **contract["predecessor"]} if contract else None
                     ),
                     "plans": [],
+                    "current_plan_id": None,
                     "confirmed_revision": None,
                     "confirmed_revisions": [],
                 }
@@ -1091,7 +1126,12 @@ def prepare_keyframe_generation(
     manifest = _read_v2_manifest(episode_dir)
     shot, frame = _find_frame(manifest, str(shot_id), str(frame_kind))
     frame_status = frame.get("status")
-    prior_plan = frame.get("plans", [])[-1] if frame.get("plans") else None
+    prior_plan = next(
+        (plan for plan in frame.get("plans", []) if plan.get("plan_id") == frame.get("current_plan_id")),
+        None,
+    )
+    if frame_status == "planned" and prior_plan and prior_plan.get("status") == "planned":
+        return prior_plan
     if frame_status in {"failed", "needs_regeneration"} and prior_plan and prior_plan.get("status") == "planned":
         retryable = [stage for stage in prior_plan.get("stages", []) if stage.get("status") in {"failed", "needs_regeneration"}]
         if retryable:
@@ -1135,16 +1175,58 @@ def prepare_keyframe_generation(
         "applicable_overrides": applicable,
     }
     plans = frame.setdefault("plans", [])
-    if plans and plans[-1].get("plan_id") == plan_id and plans[-1].get("status") in {"waiting_for_dependency", "reference_board_required"}:
-        plans[-1] = persisted
+    if prior_plan and prior_plan.get("plan_id") == plan_id and prior_plan.get("status") in {"waiting_for_dependency", "reference_board_required"}:
+        plans[plans.index(prior_plan)] = persisted
     else:
         plans.append(persisted)
+    _supersede_runnable_plans(frame, plan_id)
     if generated["status"] == "waiting_for_dependency":
         frame["status"] = "waiting_for_dependency"
     else:
         frame["status"] = "planned"
     _write_execution_pack(root, episode_dir, manifest)
     return persisted
+
+
+def request_keyframe_regeneration(
+    project_root: Path, episode_id: str, shot_id: str, frame_kind: str, reason: str
+) -> dict[str, Any]:
+    """Record a user-authorized redo and block all direct continuity dependents.
+
+    This is deliberately the only public route from a confirmed/reviewed frame
+    back to planning.  It keeps the former plan and output history immutable,
+    then prevents a downstream frame from reusing an obsolete anchor.
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("重做请求必须说明原因")
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    manifest = _read_v2_manifest(episode_dir)
+    _, frame = _find_frame(manifest, str(shot_id), str(frame_kind))
+    if frame.get("status") not in {"confirmed", "pending_review", "needs_regeneration", "failed"}:
+        raise ValueError(f"关键帧当前状态不允许请求重做：{frame.get('status')}")
+    request_id = f"RR-{_frame_key(str(shot_id), str(frame_kind))}-r{len(frame.get('regeneration_requests', [])) + 1:03d}"
+    frame.setdefault("regeneration_requests", []).append(
+        {"request_id": request_id, "reason": reason.strip(), "requested_at": _utcnow()}
+    )
+    _invalidate_frame_plans(frame, f"用户请求重做：{reason.strip()}")
+    frame["status"] = "needs_regeneration"
+
+    invalidated: list[dict[str, str]] = []
+    predecessor = {"shot_id": str(shot_id), "frame_kind": str(frame_kind)}
+    for candidate_shot in manifest.get("shots", []):
+        for candidate_frame in candidate_shot.get("frames", []):
+            contract = candidate_frame.get("frame_spec", {}).get("continuity_contract")
+            if not contract or contract.get("predecessor") != predecessor:
+                continue
+            _invalidate_frame_plans(candidate_frame, f"连续性锚点 {shot_id}/{frame_kind} 正在重做")
+            candidate_frame["status"] = "waiting_for_dependency"
+            candidate_frame["blocked_by_regeneration"] = request_id
+            invalidated.append(
+                {"shot_id": str(candidate_shot.get("shot_id")), "frame_kind": str(candidate_frame.get("frame_kind"))}
+            )
+    _write_execution_pack(root, episode_dir, manifest)
+    return {"request_id": request_id, "shot_id": str(shot_id), "frame_kind": str(frame_kind), "invalidated_dependents": invalidated}
 
 
 def _expected_stage_inputs(plan: dict[str, Any], stage: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1161,13 +1243,75 @@ def _expected_stage_inputs(plan: dict[str, Any], stage: dict[str, Any]) -> list[
     return expected
 
 
-def _validate_generation_result(root: Path, plan_id: str, stage_id: str, result: dict[str, Any], expected: list[dict[str, Any]]) -> tuple[Path, str, list[dict[str, Any]]]:
-    required = ("plan_id", "stage_id", "tool_request_id", "prompt", "input_images", "started_at", "completed_at")
+def _rehash_stage_inputs(root: Path, expected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Re-hash every persisted input immediately before adapter dispatch."""
+    verified: list[dict[str, Any]] = []
+    for image in expected:
+        _, path = _project_image(root, image.get("path"), "已批准阶段输入 path")
+        if not image.get("sha256") or _sha256(root / path) != image["sha256"]:
+            raise ValueError(f"已批准阶段输入哈希不匹配：{path}")
+        verified.append({"role": image.get("role"), "path": path, "sha256": image["sha256"]})
+    return verified
+
+
+def begin_stage_generation(
+    project_root: Path, episode_id: str, plan_id: str, stage_id: str
+) -> dict[str, Any]:
+    """Persist the sole planned->generating dispatch before an adapter can run.
+
+    The returned payload is the entire provider-neutral adapter contract.  It
+    is intentionally the only public route that exposes a runnable request.
+    """
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    manifest = _read_v2_manifest(episode_dir)
+    _, frame, plan = _find_plan(manifest, plan_id)
+    _require_current_plan(frame, plan)
+    stage = _stage(plan, stage_id)
+    if plan.get("status") != "planned" or stage.get("status") != "planned":
+        raise ValueError("该阶段当前不允许派发生成")
+    if frame.get("status") not in {"planned", "generating"}:
+        raise ValueError("关键帧当前状态不允许派发生成")
+    prompt = stage.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        raise ValueError("已批准阶段缺少不可变 prompt")
+    expected = _rehash_stage_inputs(root, _expected_stage_inputs(plan, stage))
+    if len(expected) > MAX_INPUT_IMAGES:
+        raise ValueError("已批准阶段输入超过 5 张")
+    dispatch_id = f"D-{plan_id}-{stage_id}-r{len(stage.get('dispatches', [])) + 1:03d}"
+    dispatch = {
+        "dispatch_id": dispatch_id,
+        "plan_id": plan_id,
+        "stage_id": stage_id,
+        "prompt": prompt,
+        "input_images": expected,
+        "dispatched_at": _utcnow(),
+    }
+    stage.setdefault("dispatches", []).append(dispatch)
+    stage["dispatch"] = dispatch
+    stage["status"] = "generating"
+    frame["status"] = "generating"
+    _write_execution_pack(root, episode_dir, manifest)
+    return dict(dispatch)
+
+
+def _validate_generation_result(
+    root: Path,
+    plan_id: str,
+    stage_id: str,
+    result: dict[str, Any],
+    dispatch: dict[str, Any],
+) -> tuple[Path, str, list[dict[str, Any]]]:
+    required = ("plan_id", "stage_id", "dispatch_id", "tool_request_id", "prompt", "input_images", "started_at", "completed_at")
     missing = [field for field in required if not result.get(field)]
     if missing:
         raise ValueError(f"生成结果缺少字段：{', '.join(missing)}")
     if result["plan_id"] != plan_id or result["stage_id"] != stage_id:
         raise ValueError("生成结果的 plan_id 或 stage_id 不匹配")
+    if result["dispatch_id"] != dispatch.get("dispatch_id"):
+        raise ValueError("生成结果不是当前已派发请求的完成结果")
+    if result["prompt"] != dispatch.get("prompt"):
+        raise ValueError("生成结果 prompt 与已批准阶段 prompt 不完全一致")
     actual = result["input_images"]
     if not isinstance(actual, list):
         raise ValueError("生成结果 input_images 必须是列表")
@@ -1179,7 +1323,7 @@ def _validate_generation_result(root: Path, plan_id: str, stage_id: str, result:
         if not image.get("sha256") or _sha256(root / path) != image["sha256"]:
             raise ValueError(f"生成输入哈希不匹配：{path}")
         normalized.append({"role": image.get("role"), "path": path, "sha256": image.get("sha256")})
-    if normalized != expected:
+    if normalized != dispatch.get("input_images"):
         raise ValueError("生成结果实际输入与已批准阶段输入不完全一致")
     output, output_path = _project_image(root, result.get("output_path"), "生成 output_path")
     return output, output_path, normalized
@@ -1188,23 +1332,24 @@ def _validate_generation_result(root: Path, plan_id: str, stage_id: str, result:
 def record_stage_generation(
     project_root: Path, episode_id: str, plan_id: str, stage_id: str, generation_result: dict[str, Any]
 ) -> dict[str, Any]:
-    """Persist a provider result after exact approved-input and hash checks."""
+    """Persist only the completion of a prior, durable dispatch."""
     root = project_root.resolve()
     episode_dir = _episode_directory(root, episode_id)
     manifest = _read_v2_manifest(episode_dir)
     shot, frame, plan = _find_plan(manifest, plan_id)
+    _require_current_plan(frame, plan)
     stage = _stage(plan, stage_id)
-    if plan.get("status") != "planned" or stage.get("status") != "planned":
+    if plan.get("status") != "planned" or stage.get("status") != "generating" or not stage.get("dispatch"):
         raise ValueError("该阶段当前不允许记录生成结果")
-    expected = _expected_stage_inputs(plan, stage)
-    if len(expected) > MAX_INPUT_IMAGES:
-        raise ValueError("已批准阶段输入超过 5 张")
+    dispatch = stage["dispatch"]
     if generation_result.get("error"):
+        if generation_result.get("dispatch_id") != dispatch.get("dispatch_id"):
+            raise ValueError("生成失败结果不是当前已派发请求的完成结果")
         stage.update({"status": "failed", "error": str(generation_result["error"]), "failed_at": _utcnow()})
         frame["status"] = "failed"
         _write_execution_pack(root, episode_dir, manifest)
         return stage
-    output, source_path, inputs = _validate_generation_result(root, plan_id, stage_id, generation_result, expected)
+    output, source_path, inputs = _validate_generation_result(root, plan_id, stage_id, generation_result, dispatch)
     attempts = stage.setdefault("attempts", [])
     revision, destination = _next_revision(
         episode_dir / "keyframes" / "work" / _frame_key(shot["shot_id"], frame["frame_kind"]),
@@ -1255,6 +1400,16 @@ def _stage_uses_board(stage: dict[str, Any]) -> bool:
     return any(item.get("role") == "reference_board" for item in stage.get("input_images", []))
 
 
+def _automated_qa_covers_required_categories(stage: dict[str, Any], result: dict[str, Any]) -> bool:
+    required = set(stage.get("required_qa_categories", []))
+    passing = {
+        check["category"]
+        for check in result["checks"]
+        if check["status"] == "pass" and check["confidence"] >= 0.85
+    }
+    return required.issubset(passing)
+
+
 def _confirm_final_frame(root: Path, episode_dir: Path, shot: dict[str, Any], frame: dict[str, Any], stage: dict[str, Any]) -> None:
     output = stage["output"]
     source, _ = _project_image(root, output["path"], "QA 通过产图")
@@ -1285,6 +1440,7 @@ def record_stage_qa(
     episode_dir = _episode_directory(root, episode_id)
     manifest = _read_v2_manifest(episode_dir)
     shot, frame, plan = _find_plan(manifest, plan_id)
+    _require_current_plan(frame, plan)
     stage = _stage(plan, stage_id)
     if stage.get("status") not in {"generated", "pending_review"}:
         raise ValueError("该阶段当前不允许记录 QA")
@@ -1296,6 +1452,7 @@ def record_stage_qa(
         qa_result["reviewer_type"] == "automated"
         and qa_result["status"] == "pass"
         and all(check["status"] == "pass" and check["confidence"] >= 0.85 for check in qa_result["checks"])
+        and _automated_qa_covers_required_categories(stage, qa_result)
     )
     user_pass = qa_result["reviewer_type"] == "user" and qa_result["status"] == "pass"
     if qa_result["status"] == "uncertain" or (_stage_uses_board(stage) and not user_pass) or (qa_result["status"] == "pass" and not (automated_pass or user_pass)):
@@ -1332,8 +1489,44 @@ def register_user_override(project_root: Path, episode_id: str, override: dict[s
     if scope not in {"shot", "continuity_run", "episode"}:
         raise ValueError("用户覆盖 scope 不合法")
     scope_ids = override.get("scope_ids", [])
-    if not isinstance(scope_ids, list) or (scope != "episode" and not all(isinstance(value, str) and value for value in scope_ids)):
+    if not isinstance(scope_ids, list) or not all(isinstance(value, str) and value for value in scope_ids):
         raise ValueError("用户覆盖 scope_ids 不合法")
+    shot_ids = [str(shot.get("shot_id")) for shot in manifest.get("shots", [])]
+    if scope == "episode":
+        if scope_ids:
+            raise ValueError("episode 覆盖不能指定 scope_ids")
+        effective_scope_ids = shot_ids
+    else:
+        if not scope_ids or any(value not in shot_ids for value in scope_ids):
+            raise ValueError("用户覆盖 scope_ids 不能为空且必须是本执行单镜号")
+        if scope == "continuity_run":
+            if len(scope_ids) != 1:
+                raise ValueError("continuity_run 覆盖必须从单一明确起始镜号展开")
+            start_index = shot_ids.index(scope_ids[0])
+            start_shot = manifest["shots"][start_index]
+            boundary = tuple(start_shot.get(key) for key in ("scene", "time_of_day", "narrative_segment"))
+            effective_scope_ids = []
+            for candidate in manifest["shots"][start_index:]:
+                candidate_boundary = tuple(candidate.get(key) for key in ("scene", "time_of_day", "narrative_segment"))
+                if candidate_boundary != boundary:
+                    break
+                effective_scope_ids.append(str(candidate["shot_id"]))
+            if not effective_scope_ids:
+                raise ValueError("continuity_run 未能从分镜边界展开有效镜号")
+        else:
+            effective_scope_ids = list(scope_ids)
+    if target_asset_id:
+        index_path = root / "project-settings" / "asset-index.json"
+        assets = json.loads(index_path.read_text(encoding="utf-8")).get("assets", []) if index_path.is_file() else []
+        asset = next((item for item in assets if item.get("asset_id") == target_asset_id), None)
+        expected_kind = "characters" if role == "character_identity" else "props"
+        if not asset or asset.get("kind") not in {expected_kind[:-1], expected_kind}:
+            raise ValueError(f"用户覆盖 target_asset_id 不存在或类别不匹配：{target_asset_id}")
+        for scoped_shot_id in effective_scope_ids:
+            scoped_shot = _find_shot(manifest, scoped_shot_id)
+            resolved = scoped_shot.get("resolved_asset_uses", [])
+            if not any(item.get("asset_id") == target_asset_id and item.get("role") == role for item in resolved):
+                raise ValueError(f"用户覆盖目标不适用于镜头 {scoped_shot_id}：{target_asset_id}")
     source, source_relative = _project_image(root, override.get("path"), "用户覆盖 path")
     supplied_hash = override.get("sha256")
     source_hash = _sha256(source)
@@ -1357,7 +1550,8 @@ def register_user_override(project_root: Path, episode_id: str, override: dict[s
         "role": role,
         "target_asset_id": target_asset_id,
         "scope": scope,
-        "scope_ids": list(scope_ids),
+        "scope_ids": effective_scope_ids if scope != "episode" else [],
+        "expanded_scope_ids": effective_scope_ids,
         "source": override.get("source", "user_upload"),
         "created_at": override.get("created_at", _utcnow()),
         "source_path": source_relative,

@@ -112,6 +112,12 @@ class KeyframeConsistencyTests(unittest.TestCase):
             override = {"override_id": "UO-1", "path": "references/u.png", "sha256": hashlib.sha256(b"wrong").hexdigest(), "role": "background", "scope": "shot", "scope_ids": ["01"]}
             with self.assertRaisesRegex(KeyframeConsistencyError, "哈希不匹配"):
                 resolve_applicable_overrides(root, [override], "01")
+        with self.assertRaisesRegex(KeyframeConsistencyError, "不适用于镜头素材"):
+            select_applicable_overrides(
+                [{"override_id": "UO-C99", "path": "u.png", "sha256": "x", "role": "character_identity", "target_asset_id": "C99", "scope": "shot", "scope_ids": ["01"]}],
+                "01",
+                {"C01"},
+            )
 
     def test_dimension_override_replaces_only_the_matching_default_anchor(self) -> None:
         uses = [

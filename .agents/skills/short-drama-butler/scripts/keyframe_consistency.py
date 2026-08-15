@@ -185,13 +185,15 @@ def select_applicable_overrides(
         if role in {"character_identity", "prop_identity"} and not target:
             raise KeyframeConsistencyError(f"{role} 覆盖必须指定 target_asset_id")
         if target and allowed_assets and target not in allowed_assets:
-            continue
+            raise KeyframeConsistencyError(f"用户覆盖目标不适用于镜头素材：{target}")
         scope = override.get("scope")
         if scope not in SCOPE_PRIORITY:
             raise KeyframeConsistencyError(f"用户覆盖 scope 不合法：{scope}")
         scope_ids = override.get("scope_ids", [])
         if not isinstance(scope_ids, list):
             raise KeyframeConsistencyError("用户覆盖 scope_ids 必须是列表")
+        if scope != "episode" and not scope_ids:
+            raise KeyframeConsistencyError("用户覆盖非 episode scope_ids 不能为空")
         if scope != "episode" and shot_id not in scope_ids:
             continue
         if not override.get("override_id") or not override.get("path") or not override.get("sha256"):
@@ -471,6 +473,16 @@ def build_generation_plan(
             mode = "generate"
         if len(inputs) > MAX_INPUT_IMAGES:
             raise KeyframeConsistencyError("阶段输入超过 5 张")
+        required_qa_categories: set[str] = set()
+        roles = {item.get("role") for item in inputs}
+        if roles & {"background", "lighting", "composition", "style"}:
+            required_qa_categories.add("scene")
+        if "character_identity" in roles or "reference_board" in roles:
+            required_qa_categories.add("character")
+        if "prop_identity" in roles:
+            required_qa_categories.add("prop")
+        if "edit_target" in roles or anchor_input:
+            required_qa_categories.add("continuity")
         planned_stages.append(
             {
                 "stage_id": stage_id,
@@ -478,8 +490,13 @@ def build_generation_plan(
                 "mode": mode,
                 "kind": _stage_kind(entries),
                 "input_images": inputs,
+                # The frame prompt is the immutable, adapter-facing prompt for
+                # every stage of this plan revision.  A changed prompt requires
+                # a new plan revision; it is never supplied ad hoc at completion.
+                "prompt": str(frame_spec.get("prompt", "")),
                 "allowed_changes": list(frame_spec.get("allowed_changes", [])),
                 "invariants": list(frame_spec.get("invariants", [])),
+                "required_qa_categories": sorted(required_qa_categories),
             }
         )
 
