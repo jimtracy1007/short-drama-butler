@@ -994,6 +994,7 @@ def create_keyframe_execution_pack(
                     ),
                     "plans": [],
                     "confirmed_revision": None,
+                    "confirmed_revisions": [],
                 }
             )
         v2_shots.append({**shot, "frames": frames})
@@ -1260,12 +1261,19 @@ def _confirm_final_frame(root: Path, episode_dir: Path, shot: dict[str, Any], fr
     final_dir = episode_dir / "keyframes" / "final" / _frame_key(shot["shot_id"], frame["frame_kind"])
     revision, destination = _next_revision(final_dir, source.suffix.lower() or ".png")
     shutil.copy2(source, destination)
+    history = frame.setdefault("confirmed_revisions", [])
     previous = frame.get("confirmed_revision")
+    if previous and not history:
+        # Preserve a pre-history v2 pointer if this frame is re-confirmed after
+        # the history field was introduced.
+        history.append(previous)
+    previous = history[-1] if history else None
     confirmed = {"revision": revision, "path": destination.relative_to(root).as_posix(), "sha256": _sha256(destination), "confirmed_at": _utcnow()}
-    frame["confirmed_revision"] = confirmed
     if previous:
         previous["superseded_by"] = revision
         confirmed["supersedes"] = previous["revision"]
+    history.append(confirmed)
+    frame["confirmed_revision"] = confirmed
     frame["status"] = "confirmed"
 
 

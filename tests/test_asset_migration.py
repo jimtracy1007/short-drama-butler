@@ -391,6 +391,27 @@ class AssetMigrationTests(unittest.TestCase):
             record_stage_qa(root, "EP001", start_plan["plan_id"], stage["stage_id"], {
                 "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:02:00Z", "checks": [{"category": "scene", "status": "pass", "confidence": 0.9, "evidence_paths": []}], "issues": [],
             })
+            # Simulate a subsequent, recorded regeneration decision and confirm
+            # a second final revision through the same public state APIs.
+            manifest_path = episode / "keyframe-execution-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["shots"][0]["frames"][0]["status"] = "needs_regeneration"
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            replacement_plan = prepare_keyframe_generation(root, "EP001", "01", "start")
+            replacement_stage = replacement_plan["stages"][0]
+            self.write_file(root, "provider/start-r002.png", b"start-replacement")
+            record_stage_generation(root, "EP001", replacement_plan["plan_id"], replacement_stage["stage_id"], {
+                "plan_id": replacement_plan["plan_id"], "stage_id": replacement_stage["stage_id"], "tool_request_id": "req-start-r002", "prompt": "海浪靠岸，修订版", "input_images": replacement_stage["input_images"], "output_path": "provider/start-r002.png", "started_at": "2026-08-15T00:02:30Z", "completed_at": "2026-08-15T00:03:00Z",
+            })
+            record_stage_qa(root, "EP001", replacement_plan["plan_id"], replacement_stage["stage_id"], {
+                "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:03:30Z", "checks": [{"category": "scene", "status": "pass", "confidence": 0.95, "evidence_paths": []}], "issues": [],
+            })
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            start_history = manifest["shots"][0]["frames"][0]["confirmed_revisions"]
+            self.assertEqual([item["revision"] for item in start_history], ["r001", "r002"])
+            self.assertEqual(start_history[0]["superseded_by"], "r002")
+            self.assertEqual(start_history[1]["supersedes"], "r001")
+            self.assertEqual(manifest["shots"][0]["frames"][0]["confirmed_revision"]["revision"], "r002")
             end_plan = prepare_keyframe_generation(root, "EP001", "01", "end")
             self.assertEqual(end_plan["status"], "planned")
             end_stage = end_plan["stages"][0]
