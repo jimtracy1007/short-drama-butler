@@ -28,6 +28,21 @@ from keyframe_consistency import (
 
 KIND_PREFIXES = {"characters": "C", "scenes": "S", "props": "P"}
 KIND_LABELS = {"characters": "新角色", "scenes": "新场景", "props": "新道具"}
+ASSET_TIMINGS = ("before_storyboard", "before_keyframes", "incidental")
+ASSET_TIMING_LABELS = {
+    "before_storyboard": "分镜前确认",
+    "before_keyframes": "关键帧前确认",
+    "incidental": "随关键帧画面处理，不单独入库",
+}
+ASSET_TIMING_ALIASES = {
+    "分镜前": "before_storyboard",
+    "分镜前确认": "before_storyboard",
+    "关键帧前": "before_keyframes",
+    "关键帧前确认": "before_keyframes",
+    "装饰": "incidental",
+    "装饰性": "incidental",
+    "画面内处理": "incidental",
+}
 KEYFRAME_STRATEGIES = {
     "start_only": ("首帧", ["start"]),
     "start_end": ("首帧、尾帧", ["start", "end"]),
@@ -329,6 +344,7 @@ def episode_creation_gate(
 
 
 STORY_OUTLINE_REQUIRED_HEADINGS = ("## 故事梗概", "## 人物小传", "## 本集大纲")
+STORY_OUTLINE_ASSET_CLASSIFICATION_HEADING = "## 视觉资产分级"
 
 
 def _story_outline_path(episode_dir: Path) -> Path:
@@ -381,6 +397,78 @@ def _validate_story_outline_body(content: str) -> str:
     return body
 
 
+def _normalize_asset_timing(value: object, *, default: str = "before_storyboard") -> str:
+    timing = str(value or "").strip()
+    timing = ASSET_TIMING_ALIASES.get(timing, timing or default)
+    if timing not in ASSET_TIMINGS:
+        raise ValueError(
+            "视觉资产时机不合法："
+            f"{timing}（可选：{'、'.join(ASSET_TIMINGS)}）"
+        )
+    return timing
+
+
+def _markdown_section(contents: str, heading: str) -> str:
+    marker = f"{heading}\n"
+    start = contents.find(marker)
+    if start < 0:
+        return ""
+    body_start = start + len(marker)
+    next_heading = contents.find("\n## ", body_start)
+    if next_heading < 0:
+        next_heading = len(contents)
+    return contents[body_start:next_heading]
+
+
+def _outline_asset_classifications(content: str) -> list[dict[str, str]]:
+    """Read the small machine-readable asset table embedded in an approved outline."""
+    section = _markdown_section(content, STORY_OUTLINE_ASSET_CLASSIFICATION_HEADING)
+    if not section:
+        return []
+    classifications: list[dict[str, str]] = []
+    for raw_line in section.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("<!--"):
+            continue
+        cells = [cell.strip().strip("`") for cell in line.strip("|- ").split("|")]
+        if len(cells) < 3 or cells[0] in {"名称", "素材名称"}:
+            continue
+        if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells[:3]):
+            continue
+        name, kind, timing = cells[:3]
+        if kind not in KIND_PREFIXES:
+            raise ValueError(f"视觉资产分级中的类别不合法：{name} / {kind}")
+        classifications.append(
+            {
+                "name": name,
+                "kind": kind,
+                "timing": _normalize_asset_timing(timing),
+            }
+        )
+    return classifications
+
+
+def _apply_outline_asset_classifications(state: dict[str, Any], content: str) -> None:
+    """Apply outline-approved timing without making an asset usable prematurely."""
+    drafts = normalize_asset_drafts(state.get("new_asset_drafts", []))
+    by_name = {draft["name"]: draft for draft in drafts}
+    for classification in _outline_asset_classifications(content):
+        draft = by_name.get(classification["name"])
+        if draft is None:
+            draft = dict(classification)
+            drafts.append(draft)
+            by_name[draft["name"]] = draft
+            continue
+        if draft.get("kind") and draft["kind"] != classification["kind"]:
+            raise ValueError(
+                f"视觉资产分级与已检测类别冲突：{draft['name']}"
+                f"（{draft['kind']} / {classification['kind']}）"
+            )
+        draft["kind"] = classification["kind"]
+        draft["timing"] = classification["timing"]
+    state["new_asset_drafts"] = drafts
+
+
 def record_story_outline(project_root: Path, episode_id: str, content: str) -> Path:
     """Persist an AI-produced outline for user review without approving it."""
     root = Path(project_root).resolve()
@@ -389,6 +477,7 @@ def record_story_outline(project_root: Path, episode_id: str, content: str) -> P
     if state.get("story_outline_status") == "user_confirmed":
         raise ValueError("故事概要已经确认；如需改稿，请先建立新的剧集版本")
     body = _validate_story_outline_body(content)
+    _apply_outline_asset_classifications(state, body)
     title = str(state.get("episode_title") or episode_id)
     story_brief = str(state.get("story_brief") or "").strip()
     path = _story_outline_path(episode_dir)
@@ -488,6 +577,8 @@ def create_asset_production_plan(
     project_root: Path,
     episode_id: str,
     asset_requests: list[dict[str, str]],
+    *,
+    timing: str | None = None,
 ) -> Path:
     """Create a post-outline visual production brief for this episode's new assets."""
     root = project_root.resolve()
@@ -496,28 +587,41 @@ def create_asset_production_plan(
     state = _read_episode_state(episode_dir)
     outline_confirmed_at = state.get("story_outline_confirmed_at")
     settings = _read_project_settings(root)
+    drafts = normalize_asset_drafts(state.get("new_asset_drafts", []))
+    if timing is None:
+        if any(draft["timing"] == "before_storyboard" for draft in drafts):
+            timing = "before_storyboard"
+        elif any(draft["timing"] == "before_keyframes" for draft in drafts):
+            timing = "before_keyframes"
+        else:
+            raise ValueError("本集没有需要单独制作的新增资产")
+    timing = _normalize_asset_timing(timing)
+    if timing == "incidental":
+        raise ValueError("装饰性元素不创建独立资产生产单；请在对应关键帧画面中处理")
+    if timing == "before_keyframes" and state.get("script_and_storyboard_status") != "user_confirmed":
+        raise ValueError("延后素材应在用户确认剧本与分镜后、规划关键帧前制作")
     if not asset_requests:
-        state = _read_episode_state(episode_dir)
-        drafts = normalize_asset_drafts(state.get("new_asset_drafts", []))
-        unclassified = [draft["name"] for draft in drafts if not draft.get("kind")]
+        selected_drafts = [draft for draft in drafts if draft["timing"] == timing]
+        unclassified = [draft["name"] for draft in selected_drafts if not draft.get("kind")]
         if unclassified:
             raise ValueError(
                 f"还不能确定这些名称的类别：{'、'.join(unclassified)}。"
                 "请用中文问用户那是新角色、新场景还是新道具，不要让用户填命令行。"
             )
-        if not drafts:
-            raise ValueError("本集没有待生成的新资产")
+        if not selected_drafts:
+            raise ValueError("本阶段没有待生成的新资产")
         story_brief = str(state.get("story_brief") or "").strip()
         asset_requests = [
             {
                 "name": draft["name"],
                 "kind": draft["kind"],
+                "timing": draft["timing"],
                 "visual_brief": (
                     f"{draft['name']}，来自本集故事"
                     + (f"：{story_brief}" if story_brief else "")
                 ),
             }
-            for draft in drafts
+            for draft in selected_drafts
         ]
 
     manifest_path = episode_dir / "asset-production-manifest.json"
@@ -549,6 +653,7 @@ def create_asset_production_plan(
     for request in asset_requests:
         name = request.get("name", "").strip()
         kind = request.get("kind", "").strip()
+        request_timing = _normalize_asset_timing(request.get("timing") or timing)
         visual_brief = request.get("visual_brief", "").strip()
         if not name or not visual_brief:
             raise ValueError("每项资产都需要名称和视觉说明")
@@ -556,6 +661,8 @@ def create_asset_production_plan(
             raise ValueError(f"资产生产单已存在同名素材：{name}")
         if kind not in KIND_PREFIXES:
             raise ValueError(f"未知素材类别：{kind}")
+        if request_timing != timing:
+            raise ValueError("同一份资产生产单只能包含同一制作时机的素材")
         names.add(name)
         scope = request.get("scope", "").strip() or f"episode-{episode_id}"
         references = resolve_production_reference_images(
@@ -572,6 +679,7 @@ def create_asset_production_plan(
             {
                 "name": name,
                 "kind": kind,
+                "timing": request_timing,
                 "scope": scope,
                 "visual_brief": visual_brief,
                 "prompt": prompt,
@@ -598,7 +706,12 @@ def create_asset_production_plan(
     lines = [
         f"# {episode_id} 本集资产生产单",
         "",
-        "在大纲确认后、正式剧本与分镜前执行。生成图片后先请用户确认，再登记为本集素材并刷新交接包。",
+        (
+            "在大纲确认后、正式剧本与分镜前执行。"
+            if timing == "before_storyboard"
+            else "在剧本与分镜获用户确认后、关键帧方案前执行。"
+        )
+        + "生成图片后先请用户确认，再登记为本集素材并刷新交接包。",
         "",
         f"- 项目画幅：{settings.get('format') or '未设置，请先确认'}",
         f"- 默认范围：episode-{episode_id}（除非用户明确确认可复用）",
@@ -611,6 +724,7 @@ def create_asset_production_plan(
                 f"## {position}. {asset['name']}（{asset['kind']}）",
                 "",
                 f"- 范围：{asset['scope']}",
+                f"- 制作时机：{ASSET_TIMING_LABELS.get(asset.get('timing', 'before_storyboard'))}",
                 f"- 视觉说明：{asset['visual_brief']}",
                 f"- 出图提示词：{asset['prompt']}",
                 f"- 必传参考图：{_format_required_references(asset.get('required_reference_images') or [])}",
@@ -648,27 +762,80 @@ def resolve_asset_references(assets: list[dict[str, Any]], references: list[str]
 
 
 def normalize_asset_drafts(drafts: list[Any]) -> list[dict[str, str]]:
-    """Read both the legacy name-only and the classified draft formats."""
+    """Read legacy drafts safely, defaulting their unknown timing to pre-storyboard."""
     normalized: list[dict[str, str]] = []
     for draft in drafts or []:
         if isinstance(draft, str):
-            name, kind = draft.strip(), ""
+            name, kind, timing = draft.strip(), "", "before_storyboard"
         elif isinstance(draft, dict):
             name = str(draft.get("name", "")).strip()
             kind = str(draft.get("kind", "")).strip()
+            timing = _normalize_asset_timing(draft.get("timing"))
         else:
             raise ValueError(f"新增资产草案格式不合法：{draft!r}")
         if not name:
             continue
         if kind and kind not in KIND_PREFIXES:
             raise ValueError(f"新增资产类别不合法：{kind}（可选：{'、'.join(KIND_PREFIXES)}）")
-        normalized.append({"name": name, "kind": kind})
+        normalized.append({"name": name, "kind": kind, "timing": timing})
     return normalized
 
 
 def _draft_label(draft: dict[str, str]) -> str:
     kind_label = KIND_LABELS.get(draft.get("kind", ""), "类别待确认")
-    return f"{draft['name']}（{kind_label}；默认本集专属）"
+    timing_label = ASSET_TIMING_LABELS[draft.get("timing", "before_storyboard")]
+    return f"{draft['name']}（{kind_label}；{timing_label}；默认本集专属）"
+
+
+def pending_episode_assets(
+    project_root: Path,
+    episode_id: str,
+    timing: str,
+) -> list[dict[str, str]]:
+    """Return required-but-unregistered assets for one workflow gate."""
+    expected_timing = _normalize_asset_timing(timing)
+    root = project_root.resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    state = _read_episode_state(episode_dir)
+    pending: list[dict[str, str]] = []
+    names: set[str] = set()
+    manifest_path = episode_dir / "asset-production-manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for asset in manifest.get("assets", []):
+            if asset.get("status") == "registered":
+                continue
+            if _normalize_asset_timing(asset.get("timing")) != expected_timing:
+                continue
+            name = str(asset.get("name") or "").strip()
+            if not name:
+                continue
+            names.add(name)
+            pending.append(
+                {
+                    "name": name,
+                    "kind": str(asset.get("kind") or ""),
+                    "timing": expected_timing,
+                    "status": str(asset.get("status") or "planned"),
+                }
+            )
+    for draft in normalize_asset_drafts(state.get("new_asset_drafts", [])):
+        if draft["timing"] != expected_timing or draft["name"] in names:
+            continue
+        pending.append({**draft, "status": "draft"})
+    return pending
+
+
+def assert_assets_confirmed_for_timing(
+    project_root: Path,
+    episode_id: str,
+    timing: str,
+) -> None:
+    pending = pending_episode_assets(project_root, episode_id, timing)
+    if pending:
+        names = "、".join(asset["name"] for asset in pending)
+        label = ASSET_TIMING_LABELS[_normalize_asset_timing(timing)]
+        raise ValueError(f"以下{label}素材尚未登记：{names}")
 
 
 def _reuse_label(item: dict[str, Any]) -> str:
@@ -764,6 +931,7 @@ def record_script_and_storyboard_approval(project_root: Path, episode_id: str) -
     root = project_root.resolve()
     episode_dir = _episode_directory(root, episode_id)
     assert_story_outline_confirmed(root, episode_id)
+    assert_assets_confirmed_for_timing(root, episode_id, "before_storyboard")
     missing = [name for name in ("formal-script.md", "storyboard.md") if not (episode_dir / name).is_file()]
     if missing:
         raise FileNotFoundError(f"确认前缺少：{', '.join(missing)}")
@@ -894,6 +1062,7 @@ def create_keyframe_plan(project_root: Path, episode_id: str, shots: list[dict[s
     state = _read_episode_state(episode_dir)
     if state.get("script_and_storyboard_status") != "user_confirmed":
         raise ValueError("剧本和分镜尚未获用户确认，不能规划关键帧")
+    assert_assets_confirmed_for_timing(root, episode_id, "before_keyframes")
     validated_shots = _validate_keyframe_shots(shots)
     manifest = {
         "episode_id": episode_id,
@@ -968,6 +1137,7 @@ def assert_keyframe_generation_allowed(project_root: Path, episode_id: str) -> b
         raise ValueError("剧本和分镜尚未获用户确认，不能生成关键帧")
     if state.get("keyframe_plan_status") != "user_confirmed":
         raise ValueError("关键帧方案尚未获用户确认，不能生成关键帧")
+    assert_assets_confirmed_for_timing(project_root.resolve(), episode_id, "before_keyframes")
     return True
 
 
@@ -2336,7 +2506,10 @@ def create_episode(
         f"- 用户故事意图：{story_brief}\n\n"
         "## 故事梗概\n\n待 AI 根据项目设定生成。\n\n"
         "## 人物小传\n\n待 AI 根据已锁定角色与本集需求生成。\n\n"
-        "## 本集大纲\n\n待 AI 生成可确认的起承转合。\n",
+        "## 本集大纲\n\n待 AI 生成可确认的起承转合。\n\n"
+        "## 视觉资产分级\n\n"
+        "待 AI 按 `名称 | 类别 | 时机 | 理由` 列出；时机只能是 "
+        "`before_storyboard`、`before_keyframes` 或 `incidental`。\n",
         encoding="utf-8",
     )
     (episode_dir / "episode-continuity.md").write_text(
@@ -2403,7 +2576,7 @@ def create_episode(
         "## 剧情需求\n\n"
         f"{story_brief}\n\n"
         "## 本集故事概要（必须先确认）\n\n"
-        "先由 Storyboard Generator 根据本交接包写入 `story-outline.md`，至少包含“故事梗概、人物小传、本集大纲”。"
+        "先由 Storyboard Generator 根据本交接包写入 `story-outline.md`，至少包含“故事梗概、人物小传、本集大纲、视觉资产分级”。"
         "展示给用户确认后，运行 `butler.py approve-story --episode <ID>`。确认前不得创建资产生产单、派发素材图、写正式剧本或分镜。\n\n"
         "## 已锁定资产\n\n"
         f"{asset_labels or '- 无'}\n\n"
@@ -2415,9 +2588,11 @@ def create_episode(
         f"{chr(10).join(f'- {_draft_label(draft)}' for draft in new_asset_drafts) or '- 无'}\n\n"
         "## 交给 Storyboard Generator 的任务\n\n"
         + (f"使用 `${configured_skill}`" if configured_skill else "使用项目指定的分镜 Skill")
-        + f" 阅读本文件与 {context_list}，先生成并登记 `story-outline.md`（故事梗概、人物小传和本集大纲），展示给用户确认。"
+        + f" 阅读本文件与 {context_list}，先生成并登记 `story-outline.md`（故事梗概、人物小传、本集大纲和视觉资产分级），展示给用户确认。"
         "用户确认并通过 `butler.py approve-story` 前，不得计划或生成任何新素材，也不得写 `formal-script.md` 或 `storyboard.md`。"
-        "故事概要确认、素材确认后，才写 `formal-script.md` 和 `storyboard.md`。"
+        "视觉资产分级须逐行使用 `名称 | characters|scenes|props | before_storyboard|before_keyframes|incidental | 理由`。"
+        "其中 `before_storyboard` 先确认，`before_keyframes` 在剧本与分镜确认后、关键帧方案前确认，`incidental` 不创建独立素材。"
+        "故事概要确认、分镜前素材确认后，才写 `formal-script.md` 和 `storyboard.md`。"
         "正式剧本使用场次、镜头动作和角色对白；`storyboard.md` 必须使用导演版逐镜说明，不能用 Markdown 表格替代正文。"
         "开头固定为“《剧名》<本集目标时长>秒导演版分镜｜<主要场景或版本>”，随后各占一行写“整体时长：…、画面规格：…、固定场景：…、本集主题：…”，标签和内容不得拆行。"
         "按剧情节奏、动作、对白和情绪变化智能拆镜：默认只使用 5 秒或 10 秒；总时长无法凑整时，最后一镜使用不足 5 秒的余数，禁止为凑时长添加无意义碎镜头。"

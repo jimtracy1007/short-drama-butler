@@ -9,7 +9,7 @@
 当提供 storyboard-package.md，或项目根目录已有 project.yaml / asset-index.json 时，这些文件与角色圣经、冲突清单为最高优先级。
 即使本轮对话没有附交接包，只要项目记忆存在，就必须先读取；不得等用户提醒，也不得仅凭故事文字重新发明已登记外观。
 必须覆盖分镜 Skill 的默认受众、画幅、时长、镜头数、节奏和内容尺度；仅当项目字段为空时才可使用默认值。
-素材索引中的名称、别名、图片路径和已锁定视觉设定必须保留。先输出梗概、人物小传和大纲，收到确认后再输出剧本和分镜。
+素材索引中的名称、别名、图片路径和已锁定视觉设定必须保留。先输出梗概、人物小传、本集大纲和“视觉资产分级”，收到确认后再输出剧本和分镜。视觉资产分级逐行写为 `名称 | characters|scenes|props | before_storyboard|before_keyframes|incidental | 理由`：`before_storyboard` 必须先确认图片，`before_keyframes` 等剧本分镜确认后再处理，`incidental` 不创建独立素材。
 生成角色、场景、道具或关键帧图片前，必须运行 short-drama-butler/scripts/butler.py inspect 与 dispatch-asset / dispatch-keyframe，并把返回的参考图读进当前对话；禁止纯文生图。
 
 若交接包包含“上集承接（锁定）”，其中的已确认事件、角色状态、最后一帧和承接要求属于既定事实：不得自行改写、遗忘或用新设定抵消；若剧情确需变更，必须先让用户确认并回写连续性记录。

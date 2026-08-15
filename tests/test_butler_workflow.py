@@ -17,6 +17,7 @@ from image_canon import ImageCanonError  # noqa: E402
 from project_files import (  # noqa: E402
     approve_keyframe_plan,
     approve_story_outline,
+    confirm_episode_asset,
     create_asset_production_plan,
     create_episode,
     create_keyframe_execution_pack,
@@ -27,6 +28,7 @@ from project_files import (  # noqa: E402
     record_story_outline,
     record_stage_generation,
     record_stage_qa,
+    provide_episode_asset_images,
     write_asset_index,
 )
 from workflow_status import episode_status, project_status  # noqa: E402
@@ -51,11 +53,12 @@ class ButlerWorkflowTests(unittest.TestCase):
             self.fail(f"butler.py {' '.join(args)} failed: {payload}")
         return payload
 
-    def approve_outline(self, root: Path, episode_id: str) -> None:
+    def approve_outline(self, root: Path, episode_id: str, classifications: str = "") -> None:
         record_story_outline(
             root,
             episode_id,
-            "## 故事梗概\n\n测试梗概。\n\n## 人物小传\n\n主角保持既有设定。\n\n## 本集大纲\n\n起承转合。",
+            "## 故事梗概\n\n测试梗概。\n\n## 人物小传\n\n主角保持既有设定。\n\n## 本集大纲\n\n起承转合。"
+            + classifications,
         )
         approve_story_outline(root, episode_id)
 
@@ -85,8 +88,8 @@ class ButlerWorkflowTests(unittest.TestCase):
             self.assertIn("发现新角色：小鸟、咕噜", state["detected_asset_notice"])
             self.assertIn("发现新场景：森林", state["detected_asset_notice"])
             contents = package.read_text(encoding="utf-8")
-            self.assertIn("小鸟（新角色；默认本集专属）", contents)
-            self.assertIn("森林（新场景；默认本集专属）", contents)
+            self.assertIn("小鸟（新角色；分镜前确认；默认本集专属）", contents)
+            self.assertIn("森林（新场景；分镜前确认；默认本集专属）", contents)
             status = episode_status(root, "EP001")
             self.assertEqual(status["stage"], "story_outline_pending")
             self.assertIn("user_notice", status)
@@ -107,6 +110,78 @@ class ButlerWorkflowTests(unittest.TestCase):
             self.approve_outline(root, "EP001")
             create_asset_production_plan(root, "EP001", [])
             self.assertTrue(dispatch_asset(root, "EP001", "新朋友")["allowed"])
+
+    def test_asset_timing_defers_small_props_until_after_storyboard_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initialize_project(root, "测试项目", None)
+            create_episode(
+                root,
+                "EP001",
+                "餐桌",
+                "咕噜吃饭时一直看平板。",
+                [
+                    {"name": "平板", "kind": "props"},
+                    {"name": "餐盘", "kind": "props"},
+                    {"name": "窗外树影", "kind": "scenes"},
+                ],
+            )
+            self.approve_outline(
+                root,
+                "EP001",
+                "\n\n## 视觉资产分级\n\n"
+                "- 平板 | props | before_storyboard | 本集冲突核心，需多镜互动。\n"
+                "- 餐盘 | props | before_keyframes | 仅在关键镜头近景出现。\n"
+                "- 窗外树影 | scenes | incidental | 仅作普通画面装饰。",
+            )
+
+            initial = episode_status(root, "EP001")
+            self.assertEqual(initial["stage"], "assets_pending")
+            self.assertEqual([asset["name"] for asset in initial["before_storyboard_assets_pending"]], ["平板"])
+            self.assertEqual([asset["name"] for asset in initial["before_keyframes_assets_pending"]], ["餐盘"])
+            self.assertEqual([asset["name"] for asset in initial["incidental_assets"]], ["窗外树影"])
+
+            episode = root / "episodes/EP001_餐桌"
+            (episode / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
+            (episode / "storyboard.md").write_text("# 导演版分镜\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "分镜前确认素材尚未登记：平板"):
+                record_script_and_storyboard_approval(root, "EP001")
+
+            create_asset_production_plan(root, "EP001", [])
+            production = json.loads((root / "episodes/EP001_餐桌/asset-production-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual([asset["name"] for asset in production["assets"]], ["平板"])
+            tablet = self.write_file(root, "generated/tablet.png", b"tablet")
+            provide_episode_asset_images(root, "EP001", "平板", {"reference": tablet})
+            confirm_episode_asset(root, "EP001", "平板")
+
+            record_script_and_storyboard_approval(root, "EP001")
+            deferred = episode_status(root, "EP001")
+            self.assertEqual(deferred["stage"], "deferred_assets_pending")
+            with self.assertRaisesRegex(ValueError, "关键帧前确认素材尚未登记：餐盘"):
+                create_keyframe_plan(
+                    root,
+                    "EP001",
+                    [{"shot_id": "01", "duration_seconds": 5, "action": "咕噜放下平板", "strategy": "start_only"}],
+                )
+
+            create_asset_production_plan(root, "EP001", [])
+            rebuilt = json.loads((episode / "asset-production-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                [(asset["name"], asset["timing"]) for asset in rebuilt["assets"]],
+                [("平板", "before_storyboard"), ("餐盘", "before_keyframes")],
+            )
+            self.assertNotIn("窗外树影", {asset["name"] for asset in rebuilt["assets"]})
+            plate = self.write_file(root, "generated/plate.png", b"plate")
+            provide_episode_asset_images(root, "EP001", "餐盘", {"reference": plate})
+            confirm_episode_asset(root, "EP001", "餐盘")
+            ready = episode_status(root, "EP001")
+            self.assertEqual(ready["stage"], "script_approved")
+            self.assertEqual([asset["name"] for asset in ready["incidental_assets"]], ["窗外树影"])
+            create_keyframe_plan(
+                root,
+                "EP001",
+                [{"shot_id": "01", "duration_seconds": 5, "action": "咕噜放下平板", "strategy": "start_only"}],
+            )
 
     def test_plan_created_before_outline_approval_is_superseded_and_cannot_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -192,7 +267,7 @@ class ButlerWorkflowTests(unittest.TestCase):
 
             _refresh_episode_asset_handoff(root, "EP001")
             package = (root / "episodes/EP001_测试集/storyboard-package.md").read_text(encoding="utf-8")
-            self.assertIn("小兔子（类别待确认；默认本集专属）", package)
+            self.assertIn("小兔子（类别待确认；分镜前确认；默认本集专属）", package)
 
     def test_dispatch_asset_reads_kind_from_episode_drafts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

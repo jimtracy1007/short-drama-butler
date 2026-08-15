@@ -5,7 +5,6 @@
 ## 目录地图
 
 ```text
-AGENTS.md                         新对话总控：出图前必须读取已有素材
 project-settings/                 项目长期记忆
 source-material/                  导入前的原始资料
 assets/                           已确认、可在画面中使用的图片
@@ -48,12 +47,13 @@ short-drama-butler/scripts/codex_image_dispatch.py
 | 文件 | 创建时机 | 它回答的问题 | 是否可直接交给分镜 Skill |
 | --- | --- | --- | --- |
 | `story-brief.md` | 创建这一集时 | “这一集要讲什么？” | 参考；不是完整交接包。 |
+| `story-outline.md` | Storyboard Generator 生成后、用户确认前 | “故事梗概、人物小传、本集大纲与视觉资产各该何时制作？” | 是；确认后才允许进入素材生产。 |
 | `episode-overrides.yaml` | 用户给本集特殊时长、画幅、受众、内容限制或制作流程时 | “这一集有什么不同于项目默认的要求？” | 是；覆盖仅对本集有效。 |
 | `episode-continuity.md` | 创建时先生成待确认模板；本集定稿后确认 | “这一集发生了什么，下一集必须承接什么？” | 是；仅“状态：已确认”的记录才会自动带入下一集。 |
 | `episode-state.json` | 创建这一集时；确认本集资产时更新 | “本集有哪些锁定资产和待生成草案？” | Agent 内部状态；用户通常不需要编辑。 |
 | `episode-assets.md` | 创建这一集时 | “现在有哪些已确认资产？还缺哪些？” | 参考；新增草案不能当锁定资产。 |
-| `asset-production-plan.md` | 大纲确认后且有新增资产时 | “新增角色、场景、道具的图什么时候、按什么标准制作？” | 用于图片生产；不是分镜输入。 |
-| `asset-production-manifest.json` | 创建资产生产单时 | “每项计划资产的状态和预留图片路径是什么？” | 供 Agent / 工具更新；状态依次为 `planned → image_provided → user_confirmed → registered`。 |
+| `asset-production-plan.md` | 分镜前或关键帧前的对应关口 | “需要独立确认的角色、场景、道具何时、按什么标准制作？” | 用于图片生产；不是分镜输入。 |
+| `asset-production-manifest.json` | 创建资产生产单时 | “每项计划资产的状态、制作时机和预留图片路径是什么？” | 供 Agent / 工具更新；状态依次为 `planned → image_provided → user_confirmed → registered`。 |
 | `creative-review.md` | 用户确认正式剧本与分镜后 | “当前剧本与分镜可以进入关键帧阶段吗？” | 第一确认关口；必须同时存在 `formal-script.md` 与通过导演版结构校验的 `storyboard.md`。 |
 | `keyframe-plan.md` | 剧本与分镜确认后 | “默认 1 / 2 张，哪一镜确实需要过程帧？” | 用户确认的逐镜出图计划；未确认不能生成关键帧；第三帧须逐镜明确确认。 |
 | `keyframe-manifest.json` | 创建关键帧方案时 | “关键帧方案的确认状态、每镜帧类型与过程帧例外原因是什么？” | 供 Agent / 工具执行；状态为 `user_pending → user_confirmed`，未明确确认的过程帧会降为两帧。 |
@@ -68,17 +68,17 @@ short-drama-butler/scripts/codex_image_dispatch.py
 ## 资产从想法到可用图片
 
 ```text
-新名称出现在大纲
+故事概要确认时按 `名称 | 类别 | 时机 | 理由` 分级
         ↓
-episode-assets.md：本集新增草案
+before_storyboard：先确认，再写分镜
         ↓
-asset-production-plan.md：确认生产任务
+before_keyframes：分镜确认后、关键帧前确认
         ↓
-图片生成并由用户确认
+incidental：仅在关键帧画面中处理，不建独立素材
         ↓
-asset-index.json：登记为已确认资产
+独立素材图片生成并由用户确认后，才登记 asset-index.json
         ↓
-storyboard-package.md：作为锁定素材交给分镜
+storyboard-package.md：仅将已锁定资产交给分镜
 ```
 
 ## 从分镜到关键帧

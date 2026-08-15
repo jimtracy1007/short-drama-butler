@@ -24,6 +24,7 @@ from codex_image_dispatch import (  # noqa: E402
 from project_files import (  # noqa: E402
     approve_keyframe_plan,
     approve_story_outline,
+    confirm_episode_asset,
     create_asset_production_plan,
     create_episode,
     create_keyframe_execution_pack,
@@ -31,6 +32,7 @@ from project_files import (  # noqa: E402
     initialize_project,
     record_script_and_storyboard_approval,
     record_story_outline,
+    provide_episode_asset_images,
     write_asset_index,
 )
 
@@ -82,6 +84,10 @@ class CodexImageDispatchTests(unittest.TestCase):
         (episode / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
         (episode / "storyboard.md").write_text("# 分镜\n", encoding="utf-8")
         self.approve_outline(root, "EP002")
+        create_asset_production_plan(root, "EP002", [])
+        crab = self.write_file(root, "generated/crab.png", b"crab")
+        provide_episode_asset_images(root, "EP002", "小螃蟹", {"front": crab})
+        confirm_episode_asset(root, "EP002", "小螃蟹")
         record_script_and_storyboard_approval(root, "EP002")
         create_keyframe_plan(
             root,

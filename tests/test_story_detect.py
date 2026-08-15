@@ -96,7 +96,10 @@ class StoryDetectBoundaryTests(unittest.TestCase):
         }]
         encountered = detect_story_assets("咕噜遇到阿奇。", gulu, episode_id="EP001")
         self.assertEqual([item["name"] for item in encountered["known_assets"]], ["咕噜"])
-        self.assertEqual(encountered["new_asset_drafts"], [{"name": "阿奇", "kind": "characters"}])
+        self.assertEqual(
+            encountered["new_asset_drafts"],
+            [{"name": "阿奇", "kind": "characters", "timing": "before_storyboard"}],
+        )
 
         together = detect_story_assets("咕噜和阿奇一起找宝藏。", gulu, episode_id="EP001")
         draft_names = [item["name"] for item in together["new_asset_drafts"]]
@@ -228,7 +231,7 @@ class StoryDetectBoundaryTests(unittest.TestCase):
             create_episode(root, "EP003", "森林", "咕噜和小螃蟹在森林里。", [])
             self.approve_outline(root, "EP003")
             status = episode_status(root, "EP003")
-            self.assertEqual(status["stage"], "episode_created")
+            self.assertEqual(status["stage"], "assets_pending")
             self.assertEqual([item["name"] for item in status["reuse_candidates"]], ["小螃蟹"])
             create_asset_production_plan(root, "EP003", [])
             after_plan = episode_status(root, "EP003")

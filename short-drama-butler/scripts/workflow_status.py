@@ -13,7 +13,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from project_files import episode_creation_gate, normalize_asset_drafts, story_outline_is_confirmed
+from project_files import (
+    episode_creation_gate,
+    normalize_asset_drafts,
+    pending_episode_assets,
+    story_outline_is_confirmed,
+)
 from story_detect import asset_is_lockable
 
 
@@ -26,6 +31,7 @@ STAGE_ORDER = (
     "assets_ready",
     "script_pending_approval",
     "script_approved",
+    "deferred_assets_pending",
     "keyframe_plan_pending",
     "keyframe_plan_approved",
     "execution_legacy",
@@ -99,6 +105,17 @@ def _reuse_action(episode_id: str, reuse_candidates: list[dict[str, Any]]) -> st
     )
 
 
+def _asset_actions(episode_id: str, asset: dict[str, Any]) -> list[str]:
+    if asset.get("status") == "draft":
+        return [f"butler.py plan-assets --episode {episode_id}"]
+    return [
+        f"butler.py dispatch-asset --episode {episode_id} --name {asset['name']}",
+        "对返回的 view_image_paths 逐张读图，再用同一 prompt 生成参考图。",
+        f"butler.py provide-asset --episode {episode_id} --name {asset['name']} --image front=<路径>",
+        f"用户确认后：butler.py confirm-asset --episode {episode_id} --name {asset['name']}",
+    ]
+
+
 def episode_status(project_root: Path, episode_id: str) -> dict[str, Any]:
     """Return the derived stage, blockers, and the next command to run."""
     root = Path(project_root).resolve()
@@ -118,6 +135,9 @@ def episode_status(project_root: Path, episode_id: str) -> dict[str, Any]:
         for asset in production.get("assets", [])
         if asset.get("status") != "registered"
     ]
+    pre_storyboard = pending_episode_assets(root, episode_id, "before_storyboard")
+    pre_keyframes = pending_episode_assets(root, episode_id, "before_keyframes")
+    incidental = [draft for draft in drafts if draft["timing"] == "incidental"]
     has_script = (episode_dir / "formal-script.md").is_file()
     has_storyboard = (episode_dir / "storyboard.md").is_file()
     script_approved = state.get("script_and_storyboard_status") == "user_confirmed"
@@ -131,6 +151,9 @@ def episode_status(project_root: Path, episode_id: str) -> dict[str, Any]:
         "new_asset_drafts": drafts,
         "reuse_candidates": reuse_candidates,
         "unregistered_planned_assets": unregistered,
+        "before_storyboard_assets_pending": pre_storyboard,
+        "before_keyframes_assets_pending": pre_keyframes,
+        "incidental_assets": incidental,
         "has_formal_script": has_script,
         "has_storyboard": has_storyboard,
         "script_and_storyboard_approved": script_approved,
@@ -159,31 +182,26 @@ def episode_status(project_root: Path, episode_id: str) -> dict[str, Any]:
             ]
         return result
 
-    if unregistered:
+    if pre_storyboard:
         result["stage"] = "assets_pending"
         result["summary"] = (
-            f"还有 {len(unregistered)} 项新增资产未登记。"
+            f"还有 {len(pre_storyboard)} 项分镜前素材未登记。"
             + (
                 "确认其他范围素材前，不能写正式剧本或分镜。"
                 if reuse_candidates
                 else ""
             )
         )
-        result["next_actions"] = [
-            f"butler.py dispatch-asset --episode {episode_id} --name {unregistered[0]['name']}",
-            "对返回的 view_image_paths 逐张读图，再用同一 prompt 生成参考图。",
-            f"butler.py provide-asset --episode {episode_id} --name {unregistered[0]['name']} --image front=<路径>",
-            f"用户确认后：butler.py confirm-asset --episode {episode_id} --name {unregistered[0]['name']}",
-        ]
+        result["next_actions"] = _asset_actions(episode_id, pre_storyboard[0])
         if reuse_candidates:
             result["next_actions"].append(_reuse_action(episode_id, reuse_candidates))
         return result
 
-    if reuse_candidates or (drafts and not production):
-        unclassified = [draft["name"] for draft in drafts if not draft["kind"]]
+    if reuse_candidates or any(asset.get("status") == "draft" for asset in pre_storyboard):
+        unclassified = [draft["name"] for draft in drafts if not draft["kind"] and draft["timing"] == "before_storyboard"]
         result["stage"] = "episode_created"
         result["summary"] = (
-            "已检测到本集新增或越界素材；确认大纲并完成资产生产前，不能写正式剧本或分镜。"
+            "已检测到分镜前新增或越界素材；确认大纲并完成资产生产前，不能写正式剧本或分镜。"
             + (f" 以下名称还没有类别：{'、'.join(unclassified)}。" if unclassified else "")
             + (
                 f" 以下素材属于其他范围，不能自动锁定：{'、'.join(str(item.get('name')) for item in reuse_candidates)}。"
@@ -195,7 +213,7 @@ def episode_status(project_root: Path, episode_id: str) -> dict[str, Any]:
             "把 user_notice 原样告诉用户，用中文确认发现了哪些新角色/场景/道具。不要让用户填写 --asset 或任何命令。",
             "有待确认名称时，先问清是角色、场景还是道具；确认前不要写分镜。",
         ]
-        if drafts and not production:
+        if any(asset.get("status") == "draft" for asset in pre_storyboard):
             result["next_actions"].append(
                 f"用户确认大纲后运行：butler.py plan-assets --episode {episode_id}"
             )
@@ -228,6 +246,13 @@ def episode_status(project_root: Path, episode_id: str) -> dict[str, Any]:
         return result
 
     if not keyframe_plan:
+        if pre_keyframes:
+            result["stage"] = "deferred_assets_pending"
+            result["summary"] = (
+                f"剧本和分镜已确认；还有 {len(pre_keyframes)} 项关键帧前素材未登记。"
+            )
+            result["next_actions"] = _asset_actions(episode_id, pre_keyframes[0])
+            return result
         result["stage"] = "script_approved"
         result["summary"] = "剧本和分镜已确认；下一步规划每镜关键帧数量。"
         result["next_actions"] = [

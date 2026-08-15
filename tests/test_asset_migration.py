@@ -207,6 +207,10 @@ class AssetMigrationTests(unittest.TestCase):
                 )
 
             self.approve_outline(root, "EP001")
+            create_asset_production_plan(root, "EP001", [])
+            crab = self.write_file(root, "generated/crab.png", b"crab")
+            provide_episode_asset_images(root, "EP001", "小螃蟹", {"front": crab})
+            confirm_episode_asset(root, "EP001", "小螃蟹")
             record_script_and_storyboard_approval(root, "EP001")
             plan_path = create_keyframe_plan(
                 root,
@@ -907,7 +911,9 @@ class AssetMigrationTests(unittest.TestCase):
         self.assertIn("keyframe-execution.md", readme)
         self.assertIn("codex_image_dispatch.py", readme)
         self.assertIn("butler.py", readme)
-        self.assertIn("AGENTS.md", readme)
+        self.assertIn("story-outline.md", readme)
+        self.assertIn("关键帧前确认", readme)
+        self.assertNotIn("仓库根目录的 `AGENTS.md`", readme)
         skill = (repository_root / "short-drama-butler/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("新对话 / Codex 出图硬规则", skill)
         self.assertIn("codex_image_dispatch.py", skill)

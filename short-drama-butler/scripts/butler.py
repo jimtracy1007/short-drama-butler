@@ -204,7 +204,7 @@ def _command_plan_assets(root: Path, args: argparse.Namespace) -> Any:
         requests.append(entry)
     if args.requests_file:
         requests.extend(_load_json_file(Path(args.requests_file)))
-    plan = create_asset_production_plan(root, args.episode, requests)
+    plan = create_asset_production_plan(root, args.episode, requests, timing=args.timing)
     return {
         "asset_production_plan": plan.relative_to(root).as_posix(),
         "status": episode_status(root, args.episode),
@@ -411,6 +411,11 @@ def build_parser() -> argparse.ArgumentParser:
     plan_assets.add_argument("--episode", required=True)
     plan_assets.add_argument("--new", action="append", help="一般不用。用户确认后直接 plan-assets --episode 即可，会用故事里已检出的草案。")
     plan_assets.add_argument("--requests-file")
+    plan_assets.add_argument(
+        "--timing",
+        choices=("before_storyboard", "before_keyframes"),
+        help="通常省略；管家会按当前关口选择核心或延后素材。",
+    )
     plan_assets.set_defaults(func=_command_plan_assets)
 
     provide = subparsers.add_parser("provide-asset", help="登记已生成的素材图片路径")
