@@ -40,6 +40,7 @@ from project_files import (
     record_story_outline,
     decide_reuse_asset,
 )
+from storyboard_dependency import DependencyError, sync_installed_storyboard_overlay
 from workflow_status import episode_status, list_episodes, project_status, propose_story_context
 
 
@@ -130,6 +131,14 @@ def _find_dispatch(root: Path, episode_id: str, dispatch_id: str) -> dict[str, A
                         if dispatch.get("dispatch_id") == dispatch_id:
                             return dispatch
     raise ButlerError(f"执行单中找不到派发记录：{dispatch_id}")
+
+
+def _sync_storyboard_overlay() -> dict[str, Any]:
+    """Push the first-party director-board contract onto an already-installed Skill."""
+    try:
+        return sync_installed_storyboard_overlay()
+    except DependencyError as error:
+        return {"synced": False, "reason": str(error)}
 
 
 def _command_status(root: Path, args: argparse.Namespace) -> Any:
@@ -548,7 +557,10 @@ def main() -> None:
                 if args.command != "status":
                     raise
                 root = (args.project_root or Path.cwd()).resolve()
+        overlay = _sync_storyboard_overlay()
         payload = args.func(root, args)
+        if isinstance(payload, dict) and args.command in {"status", "inspect", "init"}:
+            payload["storyboard_overlay"] = overlay
         _emit(payload)
         if isinstance(payload, dict) and payload.get("allowed") is False:
             raise SystemExit(2)

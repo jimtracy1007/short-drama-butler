@@ -11,11 +11,20 @@ from pathlib import Path
 
 SHOT_PATTERN = re.compile(r"^\s*(?:#{1,6}\s*)?镜头\s*(\d+)\s*[｜|]\s*(\d+)\s*秒\s*[｜|]\s*(\S.*)\s*$")
 TABLE_SHOT_PATTERN = re.compile(r"^\s*\|\s*(\d+)\s*\|\s*(\d+)\s*秒\s*\|")
+BEAT_PATTERN = re.compile(
+    r"(?:"
+    r"\d{1,2}:\d{2}(?:\.\d+)?\s*[—–\-]\s*\d{1,2}:\d{2}(?:\.\d+)?"
+    r"|"
+    r"\d+(?:\.\d+)?\s*[—–\-]\s*\d+(?:\.\d+)?"
+    r")"
+)
 REQUIRED_METADATA = ("整体时长：", "画面规格：", "固定场景：", "本集主题：")
 COMMON_SECTIONS = (
+    "动作过程",
     "运镜",
     "台词与口型时间段",
     "非说话嘴型控制",
+    "角色声线",
     "声音策略",
     "音效",
     "入点",
@@ -36,6 +45,32 @@ def _normalized_line(line: str) -> str:
 
 def _section_labels(lines: list[str]) -> set[str]:
     return {_normalized_line(line) for line in lines}
+
+
+def _heading_order(lines: list[str], known: tuple[str, ...]) -> list[str]:
+    known_set = set(known)
+    order: list[str] = []
+    for line in lines:
+        label = _normalized_line(line)
+        if label in known_set:
+            order.append(label)
+    return order
+
+
+def _section_body(lines: list[str], heading: str, known: tuple[str, ...]) -> str:
+    known_set = set(known)
+    collecting = False
+    body: list[str] = []
+    for line in lines:
+        label = _normalized_line(line)
+        if label in known_set:
+            if collecting:
+                break
+            collecting = label == heading
+            continue
+        if collecting:
+            body.append(line)
+    return "\n".join(body).strip()
 
 
 def validate_storyboard(path: Path, target_seconds: int | None = None) -> list[str]:
@@ -83,11 +118,21 @@ def validate_storyboard(path: Path, target_seconds: int | None = None) -> list[s
         duration = int(duration_text)
         durations.append(duration)
         end = shot_starts[position + 1][0] if position + 1 < len(shot_starts) else len(lines)
-        labels = _section_labels(lines[start + 1 : end])
+        shot_lines = lines[start + 1 : end]
+        labels = _section_labels(shot_lines)
         required_sections = FIVE_SECOND_SECTIONS if duration <= 5 else TEN_SECOND_SECTIONS
         for field in required_sections:
             if field not in labels:
                 errors.append(f"镜头 {shot_id} 缺少“{field}”")
+        order = _heading_order(shot_lines, required_sections)
+        if all(field in labels for field in required_sections) and order != list(required_sections):
+            errors.append(f"镜头 {shot_id} 标题顺序必须为：{'、'.join(required_sections)}")
+        motion_body = _section_body(shot_lines, "动作过程", required_sections)
+        if "动作过程" in labels and not BEAT_PATTERN.search(motion_body):
+            errors.append(f"镜头 {shot_id} 的“动作过程”必须写出 00:00—00:xx 时间段")
+        voice_body = _section_body(shot_lines, "角色声线", required_sections)
+        if "角色声线" in labels and not voice_body:
+            errors.append(f"镜头 {shot_id} 的“角色声线”不能为空")
 
         is_last_shot = position == len(shot_starts) - 1
         if duration not in (5, 10) and not (is_last_shot and 1 <= duration <= 4):

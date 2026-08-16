@@ -17,6 +17,7 @@ from typing import Any, Iterable
 
 MAX_INPUT_IMAGES = 5
 ASSET_ROLES = {"background", "character_identity", "prop_identity", "lighting", "composition", "style"}
+MASTER_IDENTITY_ROLES = {"background", "character_identity", "prop_identity"}
 CONTINUITY_DIMENSIONS = {"space", "character_identity", "prop_identity", "composition"}
 SCOPE_PRIORITY = {"episode": 0, "continuity_run": 1, "shot": 2}
 CHARACTER_VIEWS = ("front", "side", "back", "expression-sheet")
@@ -341,14 +342,38 @@ def _validate_anchor(anchor: dict[str, Any], contract: dict[str, Any]) -> dict[s
         if not anchor.get(field):
             raise KeyframeConsistencyError(f"连续性锚点缺少 {field}")
     return {
-        "role": "edit_target",
+        "role": "continuity",
         "path": anchor["path"],
         "sha256": anchor["sha256"],
         "revision": anchor["revision"],
         "source": "continuity_anchor",
         "shot_id": anchor["shot_id"],
         "frame_kind": anchor["frame_kind"],
+        "required": False,
     }
+
+
+def _has_master_identity(entries: list[dict[str, Any]]) -> bool:
+    return any(item.get("role") in MASTER_IDENTITY_ROLES or item.get("role") == "reference_board" for item in entries)
+
+
+def _attach_previous_shot_auxiliary(
+    stages: list[list[dict[str, Any]]],
+    anchor_input: dict[str, Any] | None,
+    unselected_optional: list[dict[str, Any]],
+) -> None:
+    """Keep previous-shot frames optional.  Never let them evict a required master."""
+    if not anchor_input:
+        return
+    first = stages[0] if stages else None
+    if first is not None and _has_master_identity(first) and len(first) < MAX_INPUT_IMAGES:
+        first.append(anchor_input)
+        return
+    if first is not None and _has_master_identity(first):
+        reason = "previous-shot auxiliary dropped to keep required masters under 5-image cap"
+    else:
+        reason = "previous shot cannot be the only or primary identity reference"
+    unselected_optional.append({**anchor_input, "reason": reason})
 
 
 def build_generation_plan(
@@ -361,10 +386,13 @@ def build_generation_plan(
 ) -> dict[str, Any]:
     """Build a deterministic required-first plan without side effects.
 
-    A generate stage can take five references.  Once an edit target exists,
-    every later stage has exactly one edit target plus at most four new inputs.
-    Relationship groups are atomic; an oversized group returns the explicit
-    ``reference_board_required`` signal unless a matching approved board exists.
+    A generate stage can take five references.  Confirmed previous-shot frames
+    are optional continuity auxiliaries: they never replace required character,
+    scene, or prop masters, and they are dropped before any required master when
+    the 5-image cap is full.  Later stages still use one previous_stage
+    edit_target plus at most four new inputs.  Relationship groups are atomic;
+    an oversized group returns the explicit ``reference_board_required`` signal
+    unless a matching approved board exists.
     """
     if not plan_id:
         raise KeyframeConsistencyError("plan_id 不能为空")
@@ -407,7 +435,7 @@ def build_generation_plan(
         group_phase = _group_phase(group)
         group = [{**item, "schedule_phase": group_phase} for item in group]
         relationship_group = group[0].get("relationship_group")
-        capacity = MAX_INPUT_IMAGES if not anchor_input and not normalized_groups else MAX_INPUT_IMAGES - 1
+        capacity = MAX_INPUT_IMAGES if not normalized_groups else MAX_INPUT_IMAGES - 1
         if relationship_group and len(group) > capacity:
             asset_ids = {item["asset_id"] for item in group if item.get("asset_id")}
             board = _approved_board(approved_boards, plan_id, relationship_group, asset_ids)
@@ -440,7 +468,7 @@ def build_generation_plan(
     stage_phases: list[int] = []
     for group in normalized_groups:
         group_phase = _group_phase(group)
-        last_stage_capacity = MAX_INPUT_IMAGES if len(stages) == 1 and not anchor_input else MAX_INPUT_IMAGES - 1
+        last_stage_capacity = MAX_INPUT_IMAGES if len(stages) == 1 else MAX_INPUT_IMAGES - 1
         if stages and stage_phases[-1] == group_phase and len(stages[-1]) + len(group) <= last_stage_capacity:
             stages[-1].extend(group)
         else:
@@ -457,7 +485,7 @@ def build_generation_plan(
         for index, stage in enumerate(stages):
             if stage_phases[index] != _candidate_phase(item):
                 continue
-            capacity = MAX_INPUT_IMAGES if index == 0 and not anchor_input else MAX_INPUT_IMAGES - 1
+            capacity = MAX_INPUT_IMAGES if index == 0 else MAX_INPUT_IMAGES - 1
             if len(stage) < capacity:
                 stage.append(item)
                 placed = True
@@ -465,14 +493,13 @@ def build_generation_plan(
         if not placed:
             unselected_optional.append({**item, "reason": "required inputs consume all planned stage slots"})
 
+    _attach_previous_shot_auxiliary(stages, anchor_input, unselected_optional)
+
     planned_stages: list[dict[str, Any]] = []
     for index, entries in enumerate(stages, start=1):
         stage_id = f"stage-{index}"
         inputs = list(entries)
-        if index == 1 and anchor_input:
-            inputs.insert(0, anchor_input)
-            mode = "edit"
-        elif index > 1:
+        if index > 1:
             inputs.insert(0, {"role": "edit_target", "source": "previous_stage", "stage_id": f"stage-{index - 1}"})
             mode = "edit"
         else:
@@ -487,7 +514,7 @@ def build_generation_plan(
             required_qa_categories.add("character")
         if "prop_identity" in roles:
             required_qa_categories.add("prop")
-        if "edit_target" in roles or anchor_input:
+        if "edit_target" in roles or "continuity" in roles:
             required_qa_categories.add("continuity")
         planned_stages.append(
             {
@@ -531,7 +558,11 @@ def build_generation_plan(
     return {
         "plan_id": plan_id,
         "status": "planned",
-        "generation_mode": "single_pass" if len(planned_stages) == 1 and not anchor_input else "staged_edit",
+        "generation_mode": (
+            "single_pass"
+            if len(planned_stages) == 1 and planned_stages[0]["mode"] == "generate"
+            else "staged_edit"
+        ),
         "continuity_anchor": anchor_input,
         "stages": planned_stages,
         "unselected_optional": unselected_optional,

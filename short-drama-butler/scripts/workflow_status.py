@@ -110,7 +110,7 @@ def _asset_actions(episode_id: str, asset: dict[str, Any]) -> list[str]:
         return [f"butler.py plan-assets --episode {episode_id}"]
     return [
         f"butler.py dispatch-asset --episode {episode_id} --name {asset['name']}",
-        "对返回的 view_image_paths 逐张读图，再用同一 prompt 生成参考图。",
+        "对返回的 view_image_paths 逐张读图（已确认角色/场景母版为身份锁，不得只参考上一张草图），再用同一 prompt 生成参考图。",
         f"butler.py provide-asset --episode {episode_id} --name {asset['name']} --image front=<路径>",
         f"用户确认后：butler.py confirm-asset --episode {episode_id} --name {asset['name']}",
     ]
@@ -293,7 +293,7 @@ def episode_status(project_root: Path, episode_id: str) -> dict[str, Any]:
         result["summary"] = f"还有 {len(pending)} 帧未确认。"
         result["next_actions"] = [
             f"butler.py dispatch-keyframe --episode {episode_id} --shot {first['shot_id']} --frame {first['frame_kind']}",
-            "对返回的 view_image_paths 逐张读图，再用同一 prompt 出图。",
+            "对返回的 view_image_paths 逐张读图（角色/场景/道具母版为身份锁；上一镜仅辅助连续性，不得当唯一或主参考），再用同一 prompt 出图。",
             f"butler.py record-image --episode {episode_id} --dispatch <dispatch_id> --output <生成图路径>",
             f"butler.py record-qa --episode {episode_id} --dispatch <dispatch_id> --status pass --check scene=pass:0.9",
         ]

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import io
 import json
+import re
 import shutil
 import tempfile
 import urllib.request
@@ -20,10 +21,69 @@ UPSTREAM_REVISION = "17b9ca6dfac3e4a086a2874791ef19ae5aae3932"
 UPSTREAM_ARCHIVE_URL = f"https://github.com/liangdabiao/Seedance2-Storyboard-Generator/archive/{UPSTREAM_REVISION}.zip"
 UPSTREAM_ARCHIVE_SHA256 = "c6b1a1f982b83adc9998e4a862ac1cab97120cd5ba4012d255452b63a3387f2c"
 UPSTREAM_SKILL_SUFFIX = Path(".claude/skills") / SKILL_NAME
+OVERLAY_START = "<!-- short-drama-butler-director-board -->"
+OVERLAY_END = "<!-- /short-drama-butler-director-board -->"
+CONTRACT_NAME = "director-board-contract.md"
 
 
 class DependencyError(RuntimeError):
     """Raised when the storyboard dependency cannot be installed safely."""
+
+
+def director_board_contract_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "references" / CONTRACT_NAME
+
+
+def overlay_notice() -> str:
+    return (
+        f"{OVERLAY_START}\n"
+        "写 `storyboard.md` 时必须遵守同目录 `references/director-board-contract.md`"
+        "（短剧管家导演版合同）。该合同覆盖下文任何旧表格、旧标题或 15 秒默认。"
+        "写完后必须能通过 `short-drama-butler/scripts/validate_director_storyboard.py`。\n"
+        f"{OVERLAY_END}\n"
+    )
+
+
+def apply_director_board_overlay(skill_dir: Path) -> Path:
+    """Copy the first-party director-board contract onto an installed third-party Skill."""
+    destination = Path(skill_dir).resolve()
+    if not (destination / "SKILL.md").is_file():
+        raise DependencyError(f"不是有效的分镜 Skill：{destination}")
+    contract = director_board_contract_path()
+    if not contract.is_file():
+        raise DependencyError(f"缺少管家导演版合同：{contract}")
+    references = destination / "references"
+    references.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(contract, references / CONTRACT_NAME)
+    skill_md = destination / "SKILL.md"
+    text = skill_md.read_text(encoding="utf-8")
+    notice = overlay_notice()
+    if OVERLAY_START in text:
+        text = re.sub(
+            rf"{re.escape(OVERLAY_START)}.*?{re.escape(OVERLAY_END)}\n*",
+            notice,
+            text,
+            count=1,
+            flags=re.S,
+        )
+    elif text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end >= 0:
+            insert_at = end + 4
+            text = text[:insert_at] + "\n\n" + notice + "\n" + text[insert_at:].lstrip("\n")
+        else:
+            text = notice + "\n" + text
+    else:
+        text = notice + "\n" + text
+    skill_md.write_text(text, encoding="utf-8")
+    ledger = destination / ".short-drama-butler-dependency.json"
+    payload: dict[str, object] = {}
+    if ledger.is_file():
+        payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["overlay"] = CONTRACT_NAME
+    payload["overlay_applied_at"] = datetime.now(timezone.utc).isoformat()
+    ledger.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return references / CONTRACT_NAME
 
 
 def find_installed_skill(skill_roots: list[Path]) -> Path | None:
@@ -104,7 +164,22 @@ def install_skill(
         + "\n",
         encoding="utf-8",
     )
+    apply_director_board_overlay(installed)
     return installed
+
+
+def sync_installed_storyboard_overlay(skill_roots: list[Path] | None = None) -> dict[str, object]:
+    """Refresh the director-board contract on an already-installed third-party Skill."""
+    roots = skill_roots or default_skill_roots()
+    installed = find_installed_skill(roots)
+    if installed is None:
+        return {"synced": False, "reason": "未安装 seedance-storyboard-generator"}
+    overlay = apply_director_board_overlay(installed)
+    return {
+        "synced": True,
+        "skill": str(installed),
+        "overlay": str(overlay),
+    }
 
 
 def default_skill_roots() -> list[Path]:
@@ -128,12 +203,16 @@ def main() -> None:
     installed = find_installed_skill(roots)
     if installed is None and args.install:
         installed = install_skill(roots[0])
+    overlay = None
+    if installed is not None:
+        overlay = str(apply_director_board_overlay(installed))
     print(
         json.dumps(
             {
                 "installed": installed is not None,
                 "path": str(installed) if installed else None,
                 "source": "liangdabiao/Seedance2-Storyboard-Generator",
+                "overlay": overlay,
             },
             ensure_ascii=False,
         )

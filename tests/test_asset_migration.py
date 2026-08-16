@@ -51,11 +51,14 @@ from project_files import (  # noqa: E402
 from extract_docx_text import extract_text  # noqa: E402
 from storyboard_dependency import (  # noqa: E402
     DependencyError,
+    OVERLAY_START,
     UPSTREAM_ARCHIVE_SHA256,
     UPSTREAM_ARCHIVE_URL,
     UPSTREAM_REVISION,
+    apply_director_board_overlay,
     extract_skill_from_archive,
     find_installed_skill,
+    sync_installed_storyboard_overlay,
 )
 
 
@@ -448,7 +451,11 @@ class AssetMigrationTests(unittest.TestCase):
             end_plan = prepare_keyframe_generation(root, "EP001", "01", "end")
             self.assertEqual(end_plan["status"], "planned")
             end_stage = end_plan["stages"][0]
-            self.assertEqual(end_stage["input_images"][0]["role"], "edit_target")
+            end_roles = [item["role"] for item in end_stage["input_images"]]
+            self.assertEqual(end_stage["mode"], "generate")
+            self.assertEqual(end_roles[0], "background")
+            self.assertIn("continuity", end_roles)
+            self.assertNotEqual(end_roles[0], "edit_target")
             end_dispatch = begin_stage_generation(root, "EP001", end_plan["plan_id"], end_stage["stage_id"])
             self.write_file(root, "provider/end.png", b"end-result")
             record_stage_generation(root, "EP001", end_plan["plan_id"], end_stage["stage_id"], {
@@ -625,6 +632,8 @@ class AssetMigrationTests(unittest.TestCase):
         self.assertIn("整体时长：…、画面规格：…、固定场景：…、本集主题：…", package)
         self.assertIn("5 秒或 10 秒", package)
         self.assertIn("10 秒镜头默认首帧与尾帧", package)
+        self.assertIn("关键帧画面、动作过程、运镜、台词与口型时间段、非说话嘴型控制、角色声线", package)
+        self.assertIn("首帧 A 画面、尾帧 B 画面、动作过程、运镜、台词与口型时间段、非说话嘴型控制、角色声线", package)
         self.assertIn("validate_director_storyboard.py", package)
         self.assertNotIn("分镜表逐镜必须", package)
         self.assertNotIn("fixed-settings-source.txt", package)
@@ -644,7 +653,7 @@ class AssetMigrationTests(unittest.TestCase):
         self.assertIn("本集主题：<主题>", protocol)
         self.assertIn("首帧 A 画面", protocol)
         self.assertIn("10 秒默认 2 张", protocol)
-        for heading in ("首帧 A 画面", "尾帧 B 画面", "运镜", "台词与口型时间段", "非说话嘴型控制"):
+        for heading in ("首帧 A 画面", "尾帧 B 画面", "动作过程", "运镜", "台词与口型时间段", "非说话嘴型控制", "角色声线"):
             self.assertIn(heading, protocol)
         self.assertNotIn("分镜表逐镜必须", protocol)
 
@@ -881,6 +890,41 @@ class AssetMigrationTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path) as archive:
                 with self.assertRaisesRegex(DependencyError, "已存在"):
                     extract_skill_from_archive(archive, root)
+
+    def test_storyboard_dependency_overlays_first_party_director_board_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skill = Path(temp_dir) / "seedance-storyboard-generator"
+            skill.mkdir()
+            (skill / "SKILL.md").write_text(
+                "---\nname: seedance-storyboard-generator\ndescription: test\n---\n\n旧表格说明\n",
+                encoding="utf-8",
+            )
+            first = apply_director_board_overlay(skill)
+            second = apply_director_board_overlay(skill)
+            self.assertEqual(first, (skill / "references/director-board-contract.md").resolve())
+            self.assertEqual(second, first)
+            contract = first.read_text(encoding="utf-8")
+            self.assertIn("动作过程", contract)
+            self.assertIn("角色声线", contract)
+            skill_text = (skill / "SKILL.md").read_text(encoding="utf-8")
+            self.assertEqual(skill_text.count(OVERLAY_START), 1)
+            self.assertIn("director-board-contract.md", skill_text)
+            self.assertIn("旧表格说明", skill_text)
+
+    def test_existing_install_syncs_overlay_without_reinstall(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            skill = root / "seedance-storyboard-generator"
+            skill.mkdir()
+            (skill / "SKILL.md").write_text(
+                "---\nname: seedance-storyboard-generator\ndescription: test\n---\n",
+                encoding="utf-8",
+            )
+            result = sync_installed_storyboard_overlay([root])
+            self.assertTrue(result["synced"])
+            self.assertTrue((skill / "references/director-board-contract.md").is_file())
+            missing = sync_installed_storyboard_overlay([root / "empty"])
+            self.assertFalse(missing["synced"])
 
     def test_storyboard_dependency_is_pinned_to_a_revision_and_archive_hash(self) -> None:
         self.assertIn(UPSTREAM_REVISION, UPSTREAM_ARCHIVE_URL)

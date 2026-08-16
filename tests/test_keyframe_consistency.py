@@ -165,7 +165,7 @@ class KeyframeConsistencyTests(unittest.TestCase):
         planned = {item["asset_id"] for stage in plan["stages"] for item in stage["input_images"] if "asset_id" in item}
         self.assertEqual(planned, {item["asset_id"] for item in uses})
 
-    def test_confirmed_anchor_occupies_the_only_edit_target_slot(self) -> None:
+    def test_previous_shot_is_auxiliary_and_does_not_evict_five_masters(self) -> None:
         frame_spec = {
             "continuity_contract": {
                 "predecessor": {"shot_id": "09", "frame_kind": "start"},
@@ -173,13 +173,87 @@ class KeyframeConsistencyTests(unittest.TestCase):
                 "asset_ids": ["C01"],
             }
         }
-        anchor = {"shot_id": "09", "frame_kind": "start", "revision": "r001", "path": "keyframes/final/KF09-start/r001.png", "sha256": "anchor", "status": "confirmed"}
-        plan = build_generation_plan("P-3", frame_spec, [self.required(f"C{index:02d}") for index in range(1, 6)], [], anchor, [])
-        self.assertEqual(plan["generation_mode"], "staged_edit")
+        anchor = {
+            "shot_id": "09",
+            "frame_kind": "start",
+            "revision": "r001",
+            "path": "keyframes/final/KF09-start/r001.png",
+            "sha256": "anchor",
+            "status": "confirmed",
+        }
+        uses = [self.required(f"C{index:02d}") for index in range(1, 6)]
+        plan = build_generation_plan("P-3", frame_spec, uses, [], anchor, [])
         first = plan["stages"][0]["input_images"]
-        self.assertEqual(first[0]["role"], "edit_target")
+        roles = [item["role"] for item in first]
+        master_ids = [item["asset_id"] for item in first if item.get("role") != "continuity"]
+
+        self.assertEqual(plan["generation_mode"], "single_pass")
+        self.assertEqual(plan["stages"][0]["mode"], "generate")
+        self.assertEqual(len(plan["stages"]), 1)
+        self.assertNotIn("edit_target", roles)
+        self.assertEqual(master_ids, [f"C{index:02d}" for index in range(1, 6)])
         self.assertEqual(len(first), 5)
-        self.assertEqual(sum(item["role"] == "edit_target" for stage in plan["stages"] for item in stage["input_images"]), len(plan["stages"]))
+        self.assertEqual([item["role"] for item in plan["unselected_optional"]], ["continuity"])
+        self.assertIn("5-image cap", plan["unselected_optional"][0]["reason"])
+
+    def test_previous_shot_fills_spare_slot_after_masters(self) -> None:
+        frame_spec = {
+            "continuity_contract": {
+                "predecessor": {"shot_id": "09", "frame_kind": "start"},
+                "inherit_dimensions": ["space", "character_identity"],
+                "asset_ids": ["C01", "S01"],
+            }
+        }
+        anchor = {
+            "shot_id": "09",
+            "frame_kind": "start",
+            "revision": "r001",
+            "path": "keyframes/final/KF09-start/r001.png",
+            "sha256": "anchor",
+            "status": "confirmed",
+        }
+        uses = [self.required(f"C{index:02d}") for index in range(1, 5)]
+        plan = build_generation_plan("P-aux", frame_spec, uses, [], anchor, [])
+        first = plan["stages"][0]["input_images"]
+        roles = [item["role"] for item in first]
+
+        self.assertEqual(plan["generation_mode"], "single_pass")
+        self.assertEqual(plan["stages"][0]["mode"], "generate")
+        self.assertEqual(first[0]["role"], "character_identity")
+        self.assertNotEqual(first[0]["role"], "edit_target")
+        self.assertEqual(roles[-1], "continuity")
+        self.assertEqual(roles.count("continuity"), 1)
+        self.assertEqual(
+            [item["asset_id"] for item in first if item.get("role") != "continuity"],
+            [f"C{index:02d}" for index in range(1, 5)],
+        )
+        self.assertEqual(plan["unselected_optional"], [])
+        self.assertIn("continuity", plan["stages"][0]["required_qa_categories"])
+
+    def test_five_member_group_keeps_masters_instead_of_yielding_to_previous_shot(self) -> None:
+        frame_spec = {
+            "continuity_contract": {
+                "predecessor": {"shot_id": "01", "frame_kind": "start"},
+                "inherit_dimensions": ["character_identity"],
+                "asset_ids": ["C01"],
+            }
+        }
+        anchor = {
+            "shot_id": "01",
+            "frame_kind": "start",
+            "revision": "r001",
+            "path": "keyframes/final/KF01-start/r001.png",
+            "sha256": "anchor",
+            "status": "confirmed",
+        }
+        uses = [self.required(f"C{index:02d}", relationship_group="hold-hands") for index in range(1, 6)]
+        plan = build_generation_plan("P-group-aux", frame_spec, uses, [], anchor, [])
+        first = plan["stages"][0]["input_images"]
+
+        self.assertEqual(plan["status"], "planned")
+        self.assertEqual(plan["stages"][0]["mode"], "generate")
+        self.assertEqual([item["asset_id"] for item in first], [f"C{index:02d}" for index in range(1, 6)])
+        self.assertEqual([item["role"] for item in plan["unselected_optional"]], ["continuity"])
 
     def test_missing_anchor_waits_and_contract_must_be_explicit(self) -> None:
         contract = {"continuity_contract": {"predecessor": {"shot_id": "01", "frame_kind": "start"}, "inherit_dimensions": ["space"], "asset_ids": ["S01"]}}

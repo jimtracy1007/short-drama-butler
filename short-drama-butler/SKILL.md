@@ -9,7 +9,7 @@ description: Use when initializing or continuing an AI short-drama project, and 
 
 ## 启动依赖检查
 
-首次执行本 Skill 时，使用**本 Skill 安装目录内**的 `scripts/storyboard_dependency.py --install`（不能假定用户项目根目录有 `scripts/`）。它会检测同级 `seedance-storyboard-generator`；已安装则直接复用，缺失时才下载该 Skill 子目录。
+首次执行本 Skill 时，使用**本 Skill 安装目录内**的 `scripts/storyboard_dependency.py --install`（不能假定用户项目根目录有 `scripts/`）。它会检测同级 `seedance-storyboard-generator`；已安装则直接复用，缺失时才下载该 Skill 子目录。无论新装还是已有安装，都会把管家自己的 `references/director-board-contract.md` 盖到该 Skill 上。已经装过管家的人拉取更新后，下次运行 `butler.py status` 或 `inspect` 会自动同步这份合同，不必重装第三方 Skill。不要把第三方 `seedance-storyboard-generator/` 整目录提交进本仓库。
 
 下载固定到脚本记录的上游提交和 SHA-256，安装后写入版本账本；下载或校验失败时，报告错误并停止分镜交接，不要假装依赖已可用。
 
@@ -62,6 +62,17 @@ python short-drama-butler/scripts/butler.py record-image --episode EP001 --dispa
 4. `prompt` 必须与派发单完全一致。`allowed` 为 false，或项目已有确认素材但参考图列表为空时，停止出图。
 5. 不要询问用户是否参考已有素材。有确认图就必须用。只有项目里还没有任何确认图片时，才允许按文字圣经画第一批资产。
 6. 旧执行单没有 `schema_version: 2` 时，按 `legacy_unplanned` 处理：禁止继续用旧提示词或 `keyframes/pending/` 出图。
+7. 每一张图都必须回到已确认母版，禁止镜头链式参考（镜头2只参考镜头1、镜头3只参考镜头2）。上一镜不得当作唯一或主身份锁。
+
+禁止（误差会累积：角变长、脸漂移、帽子偏移、桌子比例跑掉）：
+
+```
+镜头1 → 镜头2 → 镜头3 → 镜头4
+```
+
+推荐 A（最稳）：每一帧都是 `角色母版 + 场景母版 + 道具母版 → 本镜`。
+
+推荐 B（实战）：本帧参考角色母版（必传，身份锁）、场景母版（必传，空间锁）、画面中的道具母版（必传），上一镜/上一帧仅可选辅助连续性（动作衔接、机位延续、视线、情绪）。上一镜不能是唯一或主身份参考。
 
 本 Skill 不绑定某个图片供应商，但 **Codex 出图必须走上述适配层**。禁止直接把 `keyframe-execution.md` 里的提示词交给 `$imagegen`。
 
@@ -109,7 +120,7 @@ python short-drama-butler/scripts/butler.py record-image --episode EP001 --dispa
 
 ## 剧本、分镜与关键帧关口
 
-调用 `seedance-storyboard-generator` 时，让它生成 `formal-script.md` 和 `storyboard.md`。前者是剧本源文件；后者是分镜源文件，默认用**导演版逐镜说明**，不是 Markdown 表格。标题固定为“《剧名》<本集目标时长>秒导演版分镜｜<主要场景或版本>”；其后必须各占一行写“整体时长：…、画面规格：…、固定场景：…、本集主题：…”，再补必要的关键视觉设定。不得把标签和内容拆成两行。之后才逐镜写完整生产信息。5 秒镜头必须依次使用“关键帧画面、运镜、台词与口型时间段、非说话嘴型控制”；10 秒镜头必须依次使用“首帧 A 画面、尾帧 B 画面、运镜、台词与口型时间段、非说话嘴型控制”。两种镜头都必须继续以独立标题写声音策略、音效、入点、出点 / 转场、素材参考和分镜出图提示词。不要另写简化版故事或简化版分镜。
+调用 `seedance-storyboard-generator` 时，让它生成 `formal-script.md` 和 `storyboard.md`。前者是剧本源文件；后者是分镜源文件，默认用**导演版逐镜说明**，不是 Markdown 表格。标题固定为“《剧名》<本集目标时长>秒导演版分镜｜<主要场景或版本>”；其后必须各占一行写“整体时长：…、画面规格：…、固定场景：…、本集主题：…”，再补必要的关键视觉设定。不得把标签和内容拆成两行。之后才逐镜写完整生产信息。5 秒镜头必须依次使用“关键帧画面、动作过程、运镜、台词与口型时间段、非说话嘴型控制、角色声线”；10 秒镜头必须依次使用“首帧 A 画面、尾帧 B 画面、动作过程、运镜、台词与口型时间段、非说话嘴型控制、角色声线”。两种镜头都必须继续以独立标题写声音策略、音效、入点、出点 / 转场、素材参考和分镜出图提示词。动作过程必须写出 `00:00—00:xx` 节拍、点名角色，并把台词写进对应时间段；角色声线写年龄/质感/音区与这一句怎么说，画外音须标明。不要另写简化版故事或简化版分镜。
 
 按剧情节奏、动作、对白和情绪变化智能拆镜：默认只使用 5 秒或 10 秒；总时长不能整除 5 秒时，最后一镜使用不足 5 秒的余数，不得为凑时长增加碎镜头。5 秒和余数镜头写“关键帧画面”，默认 1 张首帧；10 秒镜头写“首帧 A 画面、尾帧 B 画面”，默认 2 张。过程帧仅用于确实无法由首尾表达的变形、魔法、分阶段动作、复杂走位或关键反转；先在方案中写明原因，后续必须逐镜让用户明确确认，未确认即按两张执行。
 
@@ -123,7 +134,7 @@ python short-drama-butler/scripts/butler.py record-image --episode EP001 --dispa
 
 用户继续只说名称，不需要输入内部 ID。若用户为某一镜或连续段提供额外参考图，先询问其约束的维度和范围；使用 `register_user_override` 将项目内图片复制到 `references/user/` 并记录 SHA-256。人物身份或道具身份覆盖必须指定唯一 `target_asset_id`；范围只能是单镜、明确镜号列表的连续段或整集。覆盖只替换声明维度，按单镜优先于连续段优先于整集、同范围较新优先；被替代项保留为 `superseded`，不改写资产索引或角色圣经。
 
-调用 `prepare_keyframe_generation` 后，才会为一张帧图保存最多 5 张输入的阶段计划。带连续性合同的帧必须等待前序帧已确认；不可拆的关系组无法装入 5 图时，先登记并由用户确认同一计划的参考板，再重新规划。此函数只准备本地计划，**不调用任何图片、视频或剪辑供应商**。Codex 或其他适配层必须先运行 `scripts/butler.py dispatch-keyframe`（内部调用 `begin_stage_generation`）：它重算每张输入的 SHA-256、冻结提示词与输入并将阶段写为 `generating`，返回唯一的 `dispatch_id` 和 `view_image_paths`。随后适配层必须先把这些路径读进当前对话，再原样交给图片工具，并把带相同 `dispatch_id` 的返回数据交给 `scripts/butler.py record-image`；后者核对提示词、实际输入和哈希后，才将产图写为不可覆盖的工作版本：`episodes/<集>/keyframes/work/KF<镜号>-<帧类型>/rNNN-<阶段>.<扩展名>`。没有参考图路径时禁止调用图片工具。
+调用 `prepare_keyframe_generation` 后，才会为一张帧图保存最多 5 张输入的阶段计划。带连续性合同的帧必须等待前序帧已确认；不可拆的关系组无法装入 5 图时，先登记并由用户确认同一计划的参考板，再重新规划。规划时角色/场景/道具母版是必传身份锁；上一镜只占可选连续性槽，不能顶替母版。超过 5 图时先丢掉上一镜辅助，再考虑分阶段，不得为了链式参考挤掉 required 母版。此函数只准备本地计划，**不调用任何图片、视频或剪辑供应商**。Codex 或其他适配层必须先运行 `scripts/butler.py dispatch-keyframe`（内部调用 `begin_stage_generation`）：它重算每张输入的 SHA-256、冻结提示词与输入并将阶段写为 `generating`，返回唯一的 `dispatch_id` 和 `view_image_paths`。随后适配层必须先把这些路径读进当前对话，再原样交给图片工具，并把带相同 `dispatch_id` 的返回数据交给 `scripts/butler.py record-image`；后者核对提示词、实际输入和哈希后，才将产图写为不可覆盖的工作版本：`episodes/<集>/keyframes/work/KF<镜号>-<帧类型>/rNNN-<阶段>.<扩展名>`。没有参考图路径时禁止调用图片工具。`view_image_paths` 里的角色/场景/道具母版是身份与空间锁；若含上一镜，只作动作、机位、视线、情绪辅助，不得当作唯一或主参考。
 
 每次生成后，使用 `scripts/butler.py record-qa` 写入结构化质检。自动质检只有在该阶段所有 required 类别均通过且置信度不低于 0.85 时才可通过；不确定、低置信度或参考板参与的结果必须转给用户审核。质检失败或用户否决时，只重做出错阶段并递增 revision，保留旧图和理由。需要用户主动重做已确认帧时运行 `scripts/butler.py redo-keyframe`；它保留历史、废止旧计划，并将直接连续性依赖帧重新阻塞，直到新锚点确认。最后阶段通过后，系统才写入确认版本 `episodes/<集>/keyframes/final/KF<镜号>-<帧类型>/rNNN.<扩展名>`；该确认帧可成为同镜后续帧或精确指定的连续镜头锚点。
 

@@ -291,7 +291,7 @@ $seedance-storyboard-generator
 
 新对话中才需要告诉它交接包路径。它会先给大纲；确认大纲并处理完必要的新资产后，再写正式剧本和镜头表。
 
-短剧管家首次使用时会自动检测同级 `seedance-storyboard-generator`；缺失时只下载固定版本、校验过的 Skill 子目录，不覆盖已有安装。详情见[交接优先协议](short-drama-butler/references/seedance-integration-protocol.md)。
+短剧管家首次使用时会自动检测同级 `seedance-storyboard-generator`；缺失时只下载固定版本、校验过的 Skill 子目录，不覆盖上游原文件。检测、安装，或已装用户拉取管家更新后运行 `butler.py status` / `inspect`，都会把管家自己的导演版分镜合同同步到该 Skill，不必重装。不要把第三方 Skill 整目录提交进本仓库。详情见[交接优先协议](short-drama-butler/references/seedance-integration-protocol.md)。
 
 ## 常见问题
 

@@ -136,6 +136,8 @@ class CodexImageDispatchTests(unittest.TestCase):
             self.assertEqual({item["name"] for item in context["confirmed_assets"]}, {"咕噜", "泡泡湾"})
             self.assertEqual(context["episodes"][0]["episode_id"], "EP001")
             self.assertIn("view_image", " ".join(context["rules"]))
+            self.assertTrue(any("masters" in rule and "previous shot" in rule for rule in context["rules"]))
+            self.assertTrue(any("chain" in rule for rule in context["rules"]))
 
     def test_production_plan_attaches_existing_canon_images(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -178,6 +180,7 @@ class CodexImageDispatchTests(unittest.TestCase):
             self.assertTrue(card["allowed"])
             self.assertGreaterEqual(len(card["view_image_paths"]), 1)
             self.assertIn("assets/global/characters/C01_gulu/front.png", card["view_image_paths"])
+            self.assertIn("母版", " ".join(card["codex_instructions"]))
 
     def test_dispatch_asset_allows_first_canon_without_existing_images(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -220,6 +223,10 @@ class CodexImageDispatchTests(unittest.TestCase):
             self.assertEqual(card["prompt"], "咕噜在泡泡湾挥手")
             self.assertIn("出图必传参考图", execution)
             self.assertIn("C01_gulu/front.png", execution)
+            joined = " ".join(card["codex_instructions"])
+            self.assertIn("母版", joined)
+            self.assertIn("链式参考", joined)
+            self.assertIn("不得当作唯一或主身份参考", joined)
             again = dispatch_keyframe(root, "EP002", "01", "start")
             self.assertEqual(again["dispatch_id"], card["dispatch_id"])
             self.assertEqual(again["stage_id"], card["stage_id"])

@@ -93,6 +93,8 @@ def inspect_image_generation_context(project_root: Path | None = None) -> dict[s
         "rules": [
             "Do not call image_gen from text alone when confirmed_asset_count > 0.",
             "Run dispatch-keyframe or dispatch-asset and view_image every returned path first.",
+            "Lock identity to confirmed character/scene/prop masters on every frame; previous shot is optional continuity only, never the sole or primary identity reference.",
+            "Do not chain shot2→shot3→shot4 identity from previous generated frames.",
             "Use the returned prompt verbatim; do not invent a new character design.",
             "Legacy keyframe packs without schema_version 2 cannot be used for generation.",
             "Run butler.py status to see the current episode stage and the next command.",
@@ -185,7 +187,8 @@ def dispatch_keyframe(
         "view_image_paths": paths,
         "codex_instructions": [
             "先对 view_image_paths 中的每一张图调用 view_image，把它们读进当前对话。",
-            "再调用 image_gen；这些图分别作为人物身份 / 场景 / 道具 / 风格参考，不得只贴提示词。",
+            "身份锁必须回到已确认母版：角色母版、场景母版、以及画面中的道具母版。禁止镜头链式参考（镜头2只参考镜头1、镜头3只参考镜头2）。",
+            "若列表含上一镜/上一帧，只作动作衔接、机位延续、视线和情绪的辅助连续性，不得当作唯一或主身份参考。",
             "prompt 必须与本 dispatch 完全一致，不得改写外观或新增角色。",
             "生成后把结果放进项目目录，再用同一 dispatch_id 调用 record_stage_generation。",
         ],
@@ -265,8 +268,8 @@ def dispatch_asset(
             ]
             if not paths
             else [
-                "先对 view_image_paths 中的每一张图调用 view_image。",
-                "再调用 image_gen，把这些图作为风格 / 身份 / 场景参考。",
+                "先对 view_image_paths 中的每一张图调用 view_image。这些是已确认母版（角色/场景/风格），用作身份与画风锁。",
+                "再调用 image_gen，把这些母版作为风格 / 身份 / 场景参考；不得只参考上一张未确认草图。",
                 "新角色必须继承参考图的体型、配色、材质和画风，不得另起一套外观。",
                 "生成后先请用户确认，再登记为本集资产。",
             ]
