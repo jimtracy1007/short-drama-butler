@@ -29,9 +29,13 @@ from project_files import (  # noqa: E402
     create_episode,
     create_keyframe_execution_pack,
     create_keyframe_plan,
+    current_keyframe_dispatch,
+    current_keyframe_plan,
     initialize_project,
+    prepare_keyframe_generation,
     record_script_and_storyboard_approval,
     record_story_outline,
+    request_keyframe_regeneration,
     provide_episode_asset_images,
     write_asset_index,
 )
@@ -138,6 +142,10 @@ class CodexImageDispatchTests(unittest.TestCase):
             self.assertIn("view_image", " ".join(context["rules"]))
             self.assertTrue(any("masters" in rule and "previous shot" in rule for rule in context["rules"]))
             self.assertTrue(any("chain" in rule for rule in context["rules"]))
+            self.assertTrue(any("sub-agent per frame" in rule for rule in context["rules"]))
+            self.assertTrue(any("brief.text" in rule for rule in context["rules"]))
+            self.assertTrue(any("background-only" in rule or "night lighting" in rule for rule in context["rules"]))
+            self.assertTrue(any("blocking" in rule or "pose" in rule for rule in context["rules"]))
 
     def test_production_plan_attaches_existing_canon_images(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -220,13 +228,24 @@ class CodexImageDispatchTests(unittest.TestCase):
             self.assertTrue(set(card["view_image_paths"]).issubset(planned_paths))
             self.assertIn("assets/global/characters/C01_gulu/front.png", planned_paths)
             self.assertIn("assets/global/scenes/S03_bay/front.png", planned_paths)
-            self.assertEqual(card["prompt"], "咕噜在泡泡湾挥手")
+            self.assertTrue(card["prompt"].startswith("咕噜在泡泡湾挥手"))
+            self.assertIn("时间、光线和窗外氛围以场景母版和本帧提示词为准", card["prompt"])
+            self.assertEqual(card["generation_mode"], "single_pass")
             self.assertIn("出图必传参考图", execution)
             self.assertIn("C01_gulu/front.png", execution)
             joined = " ".join(card["codex_instructions"])
             self.assertIn("母版", joined)
             self.assertIn("链式参考", joined)
             self.assertIn("不得当作唯一或主身份参考", joined)
+            self.assertIn("single_pass", joined)
+            self.assertIn("不得用上一帧站位否决本帧动作", joined)
+            self.assertIn("禁止自制构图叠加层", joined)
+            self.assertTrue(card["codex_instructions"][0].startswith("出图前必须先原样输出"))
+            self.assertIn("1. 本图故事", card["brief"]["text"])
+            self.assertIn("2. 本镜引用素材", card["brief"]["text"])
+            self.assertIn("3. 制作时必须注意", card["brief"]["text"])
+            self.assertIn("咕噜", card["brief"]["text"])
+            self.assertIn("泡泡湾", card["brief"]["text"])
             again = dispatch_keyframe(root, "EP002", "01", "start")
             self.assertEqual(again["dispatch_id"], card["dispatch_id"])
             self.assertEqual(again["stage_id"], card["stage_id"])
@@ -245,6 +264,73 @@ class CodexImageDispatchTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ImageCanonError, "legacy_unplanned"):
                 dispatch_keyframe(root, "EP002", "01", "start")
+
+    def _frame_manifest(self, root: Path) -> tuple[Path, dict]:
+        manifest_path = root / "episodes/EP002_海滩小螃蟹/keyframe-execution-manifest.json"
+        return manifest_path, json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    def test_stale_generating_dispatch_is_ignored_after_plan_invalidated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.seed_project(root)
+            self.ready_keyframe_episode(root)
+            card = dispatch_keyframe(root, "EP002", "01", "start")
+            self.assertTrue(card["allowed"])
+
+            manifest_path, manifest = self._frame_manifest(root)
+            frame = manifest["shots"][0]["frames"][0]
+            self.assertEqual(frame["status"], "generating")
+            frame["current_plan_id"] = None
+            for plan in frame["plans"]:
+                plan["status"] = "invalidated"
+                plan["invalidated_reason"] = "用户请求重做：测试"
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            self.assertIsNone(current_keyframe_dispatch(root, "EP002", "01", "start"))
+            self.assertIsNone(current_keyframe_plan(root, "EP002", "01", "start"))
+
+            recovered = dispatch_keyframe(root, "EP002", "01", "start")
+            self.assertTrue(recovered["allowed"])
+            self.assertNotEqual(recovered["dispatch_id"], card["dispatch_id"])
+            self.assertNotEqual(recovered["plan_id"], card["plan_id"])
+
+    def test_prepare_recovers_from_abandoned_generating_or_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.seed_project(root)
+            self.ready_keyframe_episode(root)
+            first = dispatch_keyframe(root, "EP002", "01", "start")
+
+            manifest_path, manifest = self._frame_manifest(root)
+            frame = manifest["shots"][0]["frames"][0]
+            frame["status"] = "failed"
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            redo = request_keyframe_regeneration(root, "EP002", "01", "start", "上一轮生成卡住")
+            self.assertEqual(redo["shot_id"], "01")
+            _, after_redo = self._frame_manifest(root)
+            old_plan = after_redo["shots"][0]["frames"][0]["plans"][0]
+            self.assertEqual(old_plan["status"], "invalidated")
+            self.assertEqual(old_plan["stages"][0]["status"], "failed")
+            self.assertIn("上一轮生成卡住", old_plan["stages"][0]["error"])
+            self.assertIsNone(current_keyframe_dispatch(root, "EP002", "01", "start"))
+
+            prepared = prepare_keyframe_generation(root, "EP002", "01", "start")
+            self.assertEqual(prepared["status"], "planned")
+            self.assertNotEqual(prepared["plan_id"], first["plan_id"])
+
+            manifest_path, manifest = self._frame_manifest(root)
+            frame = manifest["shots"][0]["frames"][0]
+            frame["status"] = "failed"
+            frame["current_plan_id"] = None
+            for plan in frame["plans"]:
+                plan["status"] = "invalidated"
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            recovered = prepare_keyframe_generation(root, "EP002", "01", "start")
+            self.assertEqual(recovered["status"], "planned")
+            self.assertNotEqual(recovered["plan_id"], prepared["plan_id"])
+            card = dispatch_keyframe(root, "EP002", "01", "start")
+            self.assertTrue(card["allowed"])
+            self.assertEqual(card["plan_id"], recovered["plan_id"])
 
     def test_text_only_generation_is_rejected_after_canon_exists(self) -> None:
         with self.assertRaisesRegex(ImageCanonError, "禁止"):
@@ -275,6 +361,124 @@ class CodexImageDispatchTests(unittest.TestCase):
                 resolve_production_reference_images(root, name="小螃蟹", kind="characters", visual_brief="圆润"),
                 [],
             )
+
+    def test_dispatch_rebuilds_obsolete_background_then_character_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.seed_project(root)
+            self.ready_keyframe_episode(root)
+            first = dispatch_keyframe(root, "EP002", "01", "start")
+            self.assertEqual(first["generation_mode"], "single_pass")
+
+            manifest_path, manifest = self._frame_manifest(root)
+            frame = manifest["shots"][0]["frames"][0]
+            plan = frame["plans"][0]
+            original_inputs = list(plan["stages"][0]["input_images"])
+            scene = next(item for item in original_inputs if item.get("role") == "background")
+            characters = [item for item in original_inputs if item.get("role") == "character_identity"]
+            plan["generation_mode"] = "staged_edit"
+            plan["force_staged_edit"] = False
+            plan["stages"] = [
+                {
+                    **plan["stages"][0],
+                    "kind": "background",
+                    "input_images": [scene],
+                    "status": "qa_passed",
+                },
+                {
+                    "stage_id": "stage-2",
+                    "status": "planned",
+                    "mode": "edit",
+                    "kind": "primary_subjects",
+                    "input_images": [{"role": "edit_target", "source": "previous_stage", "stage_id": "stage-1"}, *characters],
+                    "prompt": plan["stages"][0]["prompt"],
+                    "required_qa_categories": ["character"],
+                },
+            ]
+            frame["status"] = "generating"
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            rebuilt = dispatch_keyframe(root, "EP002", "01", "start")
+            self.assertTrue(rebuilt["allowed"])
+            self.assertEqual(rebuilt["generation_mode"], "single_pass")
+            self.assertNotEqual(rebuilt["plan_id"], first["plan_id"])
+            self.assertEqual(rebuilt["stage_id"], "stage-1")
+            self.assertGreaterEqual(len(rebuilt["view_image_paths"]), 2)
+
+    def test_dispatch_refuses_night_shot_without_night_scene_view(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.seed_project(root)
+            create_episode(root, "EP004", "咕噜怕黑", "深夜泡泡湾里咕噜怕黑。", ["咕噜", "泡泡湾"])
+            episode = root / "episodes/EP004_咕噜怕黑"
+            (episode / "formal-script.md").write_text("# 正式剧本\n", encoding="utf-8")
+            (episode / "storyboard.md").write_text("# 分镜\n", encoding="utf-8")
+            self.approve_outline(root, "EP004")
+            record_script_and_storyboard_approval(root, "EP004")
+            create_keyframe_plan(
+                root,
+                "EP004",
+                [{"shot_id": "01", "duration_seconds": 5, "action": "深夜卧室", "strategy": "start_only"}],
+            )
+            approve_keyframe_plan(root, "EP004")
+            details = [
+                {
+                    "shot_id": "01",
+                    "shot_size": "中景",
+                    "camera_movement": "固定",
+                    "scene": "泡泡湾",
+                    "asset_references": ["咕噜", "泡泡湾"],
+                    "asset_uses": [
+                        {"reference": "咕噜", "role": "character_identity", "required": True},
+                        {"reference": "泡泡湾", "role": "background", "required": True},
+                    ],
+                    "start_state": "怕黑",
+                    "motion": "靠近妈妈",
+                    "end_state": "被安抚",
+                    "dialogue": "无",
+                    "voice_strategy": "后期配音",
+                    "sound_effects": "无",
+                    "transition_in": "淡入",
+                    "transition_out": "淡出",
+                    "storyboard_image_prompt": "深夜月光下的房间",
+                    "frame_prompts": {"start": "深夜卧室里咕噜和妈妈"},
+                    "frame_specs": {"start": {"continuity_contract": None, "invariants": ["咕噜身份"]}},
+                }
+            ]
+            with self.assertRaisesRegex(ValueError, "night 视图"):
+                create_keyframe_execution_pack(root, "EP004", details)
+
+            daytime = dict(details[0])
+            daytime["start_state"] = "挥手"
+            daytime["motion"] = "轻轻挥手"
+            daytime["end_state"] = "微笑"
+            daytime["storyboard_image_prompt"] = "白天的泡泡湾"
+            daytime["frame_prompts"] = {"start": "咕噜在泡泡湾挥手"}
+            create_keyframe_execution_pack(root, "EP004", [daytime])
+            manifest_path = episode / "keyframe-execution-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["shots"][0]["time_of_day"] = "night"
+            manifest["shots"][0]["storyboard_image_prompt"] = "深夜月光下的房间"
+            manifest["shots"][0]["frame_prompts"]["start"] = "深夜卧室里咕噜和妈妈"
+            manifest["shots"][0]["frames"][0]["frame_spec"]["prompt"] = "深夜卧室里咕噜和妈妈"
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            card = dispatch_keyframe(root, "EP004", "01", "start")
+            self.assertFalse(card["allowed"])
+            self.assertIn("night", card["reason"])
+            self.assertIn("dispatch-asset", card["reason"])
+
+            self.write_file(root, "assets/global/scenes/S03_bay/night.png", b"bay-night")
+            index_path = root / "project-settings/asset-index.json"
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            for asset in index["assets"]:
+                if asset["asset_id"] == "S03":
+                    asset["views"].append({"variant": "night", "path": "assets/global/scenes/S03_bay/night.png"})
+            index_path.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+            allowed = dispatch_keyframe(root, "EP004", "01", "start")
+            self.assertTrue(allowed["allowed"], allowed.get("reason"))
+            background = next(item for item in allowed["input_images"] if item.get("role") == "background")
+            self.assertTrue(str(background["path"]).endswith("night.png"))
+            self.assertIn("assets/global/scenes/S03_bay/night.png", allowed["view_image_paths"])
 
 
 if __name__ == "__main__":

@@ -18,11 +18,26 @@ from story_detect import asset_is_confirmed, asset_is_lockable, detect_story_ass
 from keyframe_consistency import (
     ASSET_ROLES,
     MAX_INPUT_IMAGES,
+    TIME_OF_DAY,
     KeyframeConsistencyError,
+    apply_background_time_views,
+    background_time_mismatch,
     build_generation_plan,
+    is_obsolete_phase_split_plan,
     resolve_applicable_overrides,
     resolve_keyframe_asset_uses,
+    shot_time_of_day,
     validate_continuity_contract,
+)
+from keyframe_prompt import (
+    apply_storyboard_to_detail,
+    assert_storyboard_shots_complete,
+    asset_uses_from_names,
+    compose_from_execution_shot,
+    details_from_storyboard,
+    load_parsed_storyboard,
+    shots_from_storyboard,
+    storyboard_shot,
 )
 
 
@@ -1055,7 +1070,7 @@ def _middle_frame_status_label(status: str) -> str:
     }.get(status, "未申请过程帧")
 
 
-def create_keyframe_plan(project_root: Path, episode_id: str, shots: list[dict[str, Any]]) -> Path:
+def create_keyframe_plan(project_root: Path, episode_id: str, shots: list[dict[str, Any]] | None = None) -> Path:
     """Create a user-reviewable per-shot keyframe plan after script and storyboard approval."""
     root = project_root.resolve()
     episode_dir = _episode_directory(root, episode_id)
@@ -1063,6 +1078,11 @@ def create_keyframe_plan(project_root: Path, episode_id: str, shots: list[dict[s
     if state.get("script_and_storyboard_status") != "user_confirmed":
         raise ValueError("剧本和分镜尚未获用户确认，不能规划关键帧")
     assert_assets_confirmed_for_timing(root, episode_id, "before_keyframes")
+    if shots is None:
+        parsed = load_parsed_storyboard(episode_dir / "storyboard.md")
+        if not parsed:
+            raise ValueError("无法从 storyboard.md 规划关键帧；请提供 shots 或先写成导演版分镜")
+        shots = shots_from_storyboard(parsed)
     validated_shots = _validate_keyframe_shots(shots)
     manifest = {
         "episode_id": episode_id,
@@ -1249,12 +1269,31 @@ def _supersede_runnable_plans(frame: dict[str, Any], replacement_plan_id: str) -
     frame["current_plan_id"] = replacement_plan_id
 
 
+def _runnable_current_plan(frame: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the current plan only when it is still the runnable one."""
+    current_id = frame.get("current_plan_id")
+    if not current_id:
+        return None
+    for plan in frame.get("plans") or []:
+        if plan.get("plan_id") != current_id:
+            continue
+        if plan.get("status") in {"invalidated", "superseded"}:
+            return None
+        return plan
+    return None
+
+
 def _invalidate_frame_plans(frame: dict[str, Any], reason: str) -> None:
     """Retain audit history but make every previous plan non-runnable."""
     for plan in frame.get("plans", []):
         if plan.get("status") not in {"superseded", "invalidated"}:
             plan["status"] = "invalidated"
             plan["invalidated_reason"] = reason
+        for stage in plan.get("stages", []):
+            if stage.get("status") == "generating":
+                stage["status"] = "failed"
+                stage["error"] = reason
+                stage["failed_at"] = _utcnow()
     frame["current_plan_id"] = None
 
 
@@ -1276,13 +1315,73 @@ def _next_revision(parent: Path, suffix: str) -> tuple[str, Path]:
         index += 1
 
 
-def _keyframe_filename(shot_id: str, frame_kind: str) -> str:
-    """Name a generated frame by its source storyboard shot and narrative position."""
-    return f"KF{shot_id}-{frame_kind}.png"
+def _keyframe_filename(
+    shot_id: str,
+    frame_kind: str,
+    suffix: str = ".png",
+    revision: str | None = None,
+    stage_id: str | None = None,
+) -> str:
+    """Flat name: KF01-start.png, KF01-start-stage-1.png, or KF01-start-r001.png."""
+    parts = [_frame_key(shot_id, frame_kind)]
+    if stage_id:
+        parts.append(str(stage_id))
+    if revision:
+        parts.append(str(revision))
+    return "-".join(parts) + suffix
+
+
+def _work_stage_id(plan: dict[str, Any], stage: dict[str, Any]) -> str | None:
+    """Keep the current frame product as KF01-start.png; only name leftover stages."""
+    stages = plan.get("stages") or []
+    if len(stages) <= 1 or stage is stages[-1]:
+        return None
+    return str(stage.get("stage_id") or "stage")
+
+
+def _archive_work_to_recovery(
+    root: Path,
+    episode_dir: Path,
+    current: Path,
+    shot_id: str,
+    frame_kind: str,
+    suffix: str,
+    revision: str,
+    stage_id: str | None,
+) -> str:
+    """Move the current work file into recovery without nesting folders."""
+    recovery_dir = episode_dir / "keyframes" / "recovery"
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    archive = recovery_dir / _keyframe_filename(shot_id, frame_kind, suffix, revision=revision, stage_id=stage_id)
+    extra = 2
+    while archive.exists():
+        archive = recovery_dir / _keyframe_filename(
+            shot_id, frame_kind, suffix, revision=f"{revision}-{extra}", stage_id=stage_id
+        )
+        extra += 1
+    shutil.move(str(current), archive)
+    return archive.relative_to(root).as_posix()
+
+
+def _retarget_keyframe_paths(frame: dict[str, Any], old_path: str, new_path: str) -> None:
+    """Keep invalidated attempts pointing at the archived recovery file."""
+    for plan in frame.get("plans") or []:
+        for stage in plan.get("stages") or []:
+            for attempt in stage.get("attempts") or []:
+                if attempt.get("path") == old_path:
+                    attempt["path"] = new_path
+            generation = stage.get("generation") or {}
+            if generation.get("path") == old_path:
+                generation["path"] = new_path
+            output = stage.get("output") or {}
+            if output.get("path") == old_path:
+                output["path"] = new_path
 
 
 def _validate_execution_details(
-    planned_shots: list[dict[str, Any]], details: list[dict[str, Any]]
+    planned_shots: list[dict[str, Any]],
+    details: list[dict[str, Any]],
+    parsed_storyboard: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     expected_by_id = {str(shot["shot_id"]): shot for shot in planned_shots}
     actual_by_id: dict[str, dict[str, Any]] = {}
@@ -1302,7 +1401,7 @@ def _validate_execution_details(
     validated: list[dict[str, Any]] = []
     for planned in planned_shots:
         shot_id = str(planned["shot_id"])
-        detail = actual_by_id[shot_id]
+        detail = apply_storyboard_to_detail(parsed_storyboard, actual_by_id[shot_id], planned["frames"])
         missing = [field for field in KEYFRAME_EXECUTION_FIELDS if not str(detail.get(field, "")).strip()]
         if missing:
             raise ValueError(f"镜头 {shot_id} 缺少执行字段：{', '.join(missing)}")
@@ -1325,6 +1424,21 @@ def _validate_execution_details(
             raise ValueError(f"镜头 {shot_id} 的关键帧提示词必须恰好包含：{expected}")
         if any(not str(prompt).strip() for prompt in frame_prompts.values()):
             raise ValueError(f"镜头 {shot_id} 的关键帧提示词不能为空")
+        explicit_time = detail.get("time_of_day")
+        if explicit_time not in {None, ""} and explicit_time not in TIME_OF_DAY:
+            raise ValueError(f"镜头 {shot_id} 的 time_of_day 必须是 {'、'.join(TIME_OF_DAY)} 之一")
+        time_of_day = shot_time_of_day(
+            {
+                "time_of_day": explicit_time if explicit_time in TIME_OF_DAY else None,
+                "scene": detail.get("scene"),
+                "storyboard_image_prompt": detail.get("storyboard_image_prompt"),
+                "start_state": detail.get("start_state"),
+                "motion": detail.get("motion"),
+                "end_state": detail.get("end_state"),
+                "frame_prompts": frame_prompts,
+            }
+        )
+        timed_uses = apply_background_time_views([dict(asset_use) for asset_use in asset_uses], time_of_day)
         frame_specs = detail.get("frame_specs")
         if not isinstance(frame_specs, dict) or set(frame_specs) != set(planned["frames"]):
             expected = "、".join(planned["frames"])
@@ -1356,9 +1470,15 @@ def _validate_execution_details(
                 "frames": planned["frames"],
                 "action": planned["action"],
                 "asset_references": [str(reference).strip() for reference in references],
-                "asset_uses": [dict(asset_use) for asset_use in asset_uses],
+                "asset_uses": timed_uses,
+                "time_of_day": time_of_day,
                 **{field: str(detail[field]).strip() for field in KEYFRAME_EXECUTION_FIELDS},
                 "frame_prompts": {frame: str(frame_prompts[frame]).strip() for frame in planned["frames"]},
+                "prompt_refinements": {
+                    frame: list(notes)
+                    for frame, notes in (detail.get("prompt_refinements") or {}).items()
+                    if frame in planned["frames"] and notes
+                },
                 "frame_specs": normalized_specs,
             }
         )
@@ -1465,7 +1585,7 @@ def _render_frame_input_line(shot_id: str, frame: dict[str, Any]) -> str:
 def create_keyframe_execution_pack(
     project_root: Path,
     episode_id: str,
-    shot_details: list[dict[str, Any]],
+    shot_details: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Create a v2, stateful execution pack from an approved keyframe plan."""
     root = project_root.resolve()
@@ -1483,7 +1603,12 @@ def create_keyframe_execution_pack(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("status") != "user_confirmed":
         raise ValueError("关键帧方案尚未获用户确认，不能创建执行单")
-    shots = _validate_execution_details(manifest.get("shots", []), shot_details)
+    parsed_storyboard = load_parsed_storyboard(episode_dir / "storyboard.md")
+    if not shot_details:
+        if not parsed_storyboard:
+            raise ValueError("无法从 storyboard.md 建立执行单，请提供 details-file")
+        shot_details = details_from_storyboard(root, parsed_storyboard, manifest.get("shots", []))
+    shots = _validate_execution_details(manifest.get("shots", []), shot_details, parsed_storyboard)
     # Resolve while creating the pack so v2 never starts from only a display
     # name.  The human-readable names remain in asset_references and Markdown.
     for shot in shots:
@@ -1616,8 +1741,17 @@ def prepare_keyframe_generation(
         (plan for plan in frame.get("plans", []) if plan.get("plan_id") == frame.get("current_plan_id")),
         None,
     )
+    runnable = _runnable_current_plan(frame)
+    if is_obsolete_phase_split_plan(runnable) or is_obsolete_phase_split_plan(prior_plan):
+        _invalidate_frame_plans(frame, "作废先背景后人物的旧计划，改为一次出图")
+        frame["status"] = "needs_regeneration"
+        frame_status = "needs_regeneration"
+        prior_plan = None
+        runnable = None
     if frame_status == "planned" and prior_plan and prior_plan.get("status") == "planned":
         return prior_plan
+    if frame_status == "generating" and runnable and runnable.get("status") == "planned":
+        return runnable
     if frame_status in {"failed", "needs_regeneration"} and prior_plan and prior_plan.get("status") == "planned":
         retryable = [stage for stage in prior_plan.get("stages", []) if stage.get("status") in {"failed", "needs_regeneration"}]
         if retryable:
@@ -1630,12 +1764,17 @@ def prepare_keyframe_generation(
                 frame["status"] = "planned"
                 _write_execution_pack(root, episode_dir, manifest)
                 return prior_plan
-    if frame_status not in {"waiting_for_dependency", "planned", "needs_regeneration"}:
+    if frame_status == "generating" and runnable is None:
+        frame_status = "needs_regeneration"
+    if frame_status not in {"waiting_for_dependency", "planned", "needs_regeneration", "failed"}:
         raise ValueError(f"关键帧当前状态不允许准备生成：{frame_status}")
     contract = frame["frame_spec"]["continuity_contract"]
     anchor = _confirmed_anchor(manifest, contract)
     try:
-        resolved_uses = resolve_keyframe_asset_uses(root, shot["asset_uses"])
+        timed_uses = apply_background_time_views(
+            shot.get("asset_uses") or [], shot_time_of_day(shot, frame.get("frame_spec"))
+        )
+        resolved_uses = resolve_keyframe_asset_uses(root, timed_uses)
         applicable = resolve_applicable_overrides(
             root, manifest.get("user_overrides", []), shot["shot_id"], {item["asset_id"] for item in resolved_uses}
         )
@@ -1697,22 +1836,197 @@ def request_keyframe_regeneration(
     )
     _invalidate_frame_plans(frame, f"用户请求重做：{reason.strip()}")
     frame["status"] = "needs_regeneration"
+    invalidated = _block_continuity_dependents(
+        manifest, str(shot_id), str(frame_kind), f"连续性锚点 {shot_id}/{frame_kind} 正在重做"
+    )
+    _write_execution_pack(root, episode_dir, manifest)
+    return {"request_id": request_id, "shot_id": str(shot_id), "frame_kind": str(frame_kind), "invalidated_dependents": invalidated}
 
-    invalidated: list[dict[str, str]] = []
+
+def _set_frame_prompt(shot: dict[str, Any], frame: dict[str, Any], prompt: str) -> None:
+    frame_kind = str(frame["frame_kind"])
+    shot.setdefault("frame_prompts", {})[frame_kind] = prompt
+    frame.setdefault("frame_spec", {})["prompt"] = prompt
+
+
+def _reopen_frame_after_prompt_change(frame: dict[str, Any], reason: str) -> None:
+    prior = frame.get("status")
+    _invalidate_frame_plans(frame, reason)
+    if prior in {"confirmed", "pending_review", "generating"} or frame.get("confirmed_revision"):
+        frame["status"] = "needs_regeneration"
+    else:
+        frame["status"] = "planned"
+
+
+def _block_continuity_dependents(
+    manifest: dict[str, Any], shot_id: str, frame_kind: str, reason: str
+) -> list[dict[str, str]]:
     predecessor = {"shot_id": str(shot_id), "frame_kind": str(frame_kind)}
+    invalidated: list[dict[str, str]] = []
     for candidate_shot in manifest.get("shots", []):
         for candidate_frame in candidate_shot.get("frames", []):
             contract = candidate_frame.get("frame_spec", {}).get("continuity_contract")
             if not contract or contract.get("predecessor") != predecessor:
                 continue
-            _invalidate_frame_plans(candidate_frame, f"连续性锚点 {shot_id}/{frame_kind} 正在重做")
+            _invalidate_frame_plans(candidate_frame, reason)
             candidate_frame["status"] = "waiting_for_dependency"
-            candidate_frame["blocked_by_regeneration"] = request_id
             invalidated.append(
-                {"shot_id": str(candidate_shot.get("shot_id")), "frame_kind": str(candidate_frame.get("frame_kind"))}
+                {
+                    "shot_id": str(candidate_shot.get("shot_id")),
+                    "frame_kind": str(candidate_frame.get("frame_kind")),
+                }
             )
+    return invalidated
+
+
+def refine_keyframe_prompt(
+    project_root: Path,
+    episode_id: str,
+    shot_id: str,
+    frame_kind: str,
+    note: str,
+) -> dict[str, Any]:
+    """Append a user still-image note and rebuild that frame's prompt from the storyboard."""
+    result = refine_keyframe_prompts(
+        project_root,
+        episode_id,
+        [{"shot_id": shot_id, "frame_kind": frame_kind, "note": note}],
+    )
+    return result["refined"][0]
+
+
+def refine_keyframe_prompts(
+    project_root: Path,
+    episode_id: str,
+    items: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Append still-image notes to one or more frames, then reopen them together."""
+    if not items:
+        raise ValueError("至少精修一帧")
+    root = Path(project_root).resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    manifest = _read_v2_manifest(episode_dir)
+    parsed = load_parsed_storyboard(episode_dir / "storyboard.md")
+    refined: list[dict[str, Any]] = []
+    for item in items:
+        shot_id = str(item.get("shot_id") or "").strip()
+        frame_kind = str(item.get("frame_kind") or "").strip()
+        note = str(item.get("note") or "").strip()
+        if shot_id.isdigit():
+            shot_id = shot_id.zfill(2)
+        if not shot_id or frame_kind not in {"start", "middle", "end"}:
+            raise ValueError("精修必须写明镜号和帧类型")
+        if not note:
+            raise ValueError("精修必须写明要改的画面")
+        shot, frame = _find_frame(manifest, shot_id, frame_kind)
+        notes = shot.setdefault("prompt_refinements", {}).setdefault(frame_kind, [])
+        if not isinstance(notes, list):
+            notes = [str(notes)]
+            shot["prompt_refinements"][frame_kind] = notes
+        notes.append(note)
+        composed = compose_from_execution_shot(parsed, shot, frame_kind)
+        prompt = composed or f"{str((shot.get('frame_prompts') or {}).get(frame_kind) or frame.get('frame_spec', {}).get('prompt') or '').strip()} 用户精修：{note}".strip()
+        _set_frame_prompt(shot, frame, prompt)
+        _reopen_frame_after_prompt_change(frame, f"用户精修提示词：{note}")
+        dependents = _block_continuity_dependents(
+            manifest, shot_id, frame_kind, f"连续性锚点 {shot_id}/{frame_kind} 的提示词已精修"
+        )
+        refined.append(
+            {
+                "shot_id": shot_id,
+                "frame_kind": frame_kind,
+                "prompt": prompt,
+                "prompt_refinements": list(notes),
+                "status": frame.get("status"),
+                "invalidated_dependents": dependents,
+            }
+        )
     _write_execution_pack(root, episode_dir, manifest)
-    return {"request_id": request_id, "shot_id": str(shot_id), "frame_kind": str(frame_kind), "invalidated_dependents": invalidated}
+    return {"count": len(refined), "refined": refined}
+
+
+def _refresh_shot_inputs(
+    root: Path, shot: dict[str, Any], parsed: dict[str, Any], parsed_shot: dict[str, Any]
+) -> None:
+    """Keep masters, time of day, and still prompts aligned with the storyboard."""
+    names = list(parsed_shot.get("asset_names") or shot.get("asset_references") or [])
+    if names:
+        shot["asset_references"] = names
+        shot["asset_uses"] = asset_uses_from_names(root, names)
+    shot["storyboard_image_prompt"] = parsed_shot.get("image_prompt") or shot.get("storyboard_image_prompt")
+    if parsed_shot.get("still_start"):
+        shot["start_state"] = parsed_shot["still_start"]
+    if parsed_shot.get("still_end"):
+        shot["end_state"] = parsed_shot["still_end"]
+    elif parsed_shot.get("still_start"):
+        shot["end_state"] = parsed_shot["still_start"]
+    if parsed_shot.get("camera_movement"):
+        shot["camera_movement"] = parsed_shot["camera_movement"]
+    if parsed.get("setting") and not str(shot.get("scene") or "").strip():
+        shot["scene"] = parsed["setting"]
+    shot.pop("time_of_day", None)
+
+
+def refresh_execution_prompts(project_root: Path, episode_id: str) -> dict[str, Any]:
+    """Rebuild still prompts, time plates, and master-only contracts from the storyboard."""
+    root = Path(project_root).resolve()
+    episode_dir = _episode_directory(root, episode_id)
+    parsed = load_parsed_storyboard(episode_dir / "storyboard.md")
+    if not parsed:
+        raise ValueError("本集 storyboard.md 无法按导演版解析，不能重拼出图提示词")
+    assert_storyboard_shots_complete(parsed)
+    manifest = _read_v2_manifest(episode_dir)
+    updated: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    for shot in manifest.get("shots", []):
+        parsed_shot = storyboard_shot(parsed, str(shot.get("shot_id", "")))
+        if not parsed_shot:
+            raise ValueError(f"分镜缺少镜头 {shot.get('shot_id')}，不能重拼出图提示词")
+        _refresh_shot_inputs(root, shot, parsed, parsed_shot)
+        for frame in shot.get("frames") or []:
+            if frame.get("status") == "generating":
+                skipped.append(
+                    {
+                        "shot_id": str(shot["shot_id"]),
+                        "frame_kind": str(frame["frame_kind"]),
+                        "reason": "generating",
+                    }
+                )
+                continue
+            spec = frame.setdefault("frame_spec", {})
+            spec["continuity_contract"] = None
+            frame["anchor_query"] = None
+            prompt = compose_from_execution_shot(parsed, shot, str(frame["frame_kind"]))
+            if not prompt:
+                raise ValueError(f"镜头 {shot.get('shot_id')} 的 {frame.get('frame_kind')} 无法从分镜拼出提示词")
+            _set_frame_prompt(shot, frame, prompt)
+            if frame.get("status") == "confirmed":
+                updated.append(
+                    {
+                        "shot_id": str(shot["shot_id"]),
+                        "frame_kind": str(frame["frame_kind"]),
+                        "status": "confirmed",
+                    }
+                )
+                continue
+            _reopen_frame_after_prompt_change(frame, "按已确认分镜重拼出图提示词")
+            updated.append({"shot_id": str(shot["shot_id"]), "frame_kind": str(frame["frame_kind"])})
+        time_of_day = shot_time_of_day(shot)
+        shot["time_of_day"] = time_of_day
+        shot["asset_uses"] = apply_background_time_views(shot.get("asset_uses") or [], time_of_day)
+        try:
+            shot["resolved_asset_uses"] = resolve_keyframe_asset_uses(root, shot["asset_uses"])
+        except KeyframeConsistencyError:
+            shot["resolved_asset_uses"] = []
+    if not updated and not skipped:
+        raise ValueError("分镜里没有可用来重拼提示词的镜头")
+    _write_execution_pack(root, episode_dir, manifest)
+    return {
+        "episode_id": episode_id,
+        "updated_frames": updated,
+        "skipped_frames": skipped,
+        "count": len(updated),
+    }
 
 
 def _expected_stage_inputs(plan: dict[str, Any], stage: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1740,6 +2054,23 @@ def _rehash_stage_inputs(root: Path, expected: list[dict[str, Any]]) -> list[dic
     return verified
 
 
+def keyframe_time_gate_reason(
+    project_root: Path,
+    episode_id: str,
+    shot_id: str,
+    frame_kind: str,
+    input_images: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """Stop keyframe dispatch when the scene plate does not match the shot's time of day."""
+    root = Path(project_root).resolve()
+    try:
+        manifest = _read_v2_manifest(_episode_directory(root, episode_id))
+        shot, frame = _find_frame(manifest, str(shot_id), str(frame_kind))
+    except (FileNotFoundError, ValueError):
+        return None
+    return background_time_mismatch(shot, input_images, frame.get("frame_spec"))
+
+
 def current_keyframe_plan(
     project_root: Path,
     episode_id: str,
@@ -1753,12 +2084,7 @@ def current_keyframe_plan(
         _, frame = _find_frame(manifest, str(shot_id), str(frame_kind))
     except (FileNotFoundError, ValueError):
         return None
-    current_id = frame.get("current_plan_id")
-    for plan in frame.get("plans") or []:
-        if current_id and plan.get("plan_id") != current_id:
-            continue
-        return plan
-    return None
+    return _runnable_current_plan(frame)
 
 
 def current_keyframe_dispatch(
@@ -1775,16 +2101,15 @@ def current_keyframe_dispatch(
         _, frame = _find_frame(manifest, str(shot_id), str(frame_kind))
     except (FileNotFoundError, ValueError):
         return None
-    current_id = frame.get("current_plan_id")
-    for plan in frame.get("plans") or []:
-        if current_id and plan.get("plan_id") != current_id:
+    plan = _runnable_current_plan(frame)
+    if not plan:
+        return None
+    for stage in plan.get("stages") or []:
+        if stage.get("status") != "generating" or not stage.get("dispatch"):
             continue
-        for stage in plan.get("stages") or []:
-            if stage.get("status") != "generating" or not stage.get("dispatch"):
-                continue
-            if stage_id and stage.get("stage_id") != stage_id:
-                continue
-            return dict(stage["dispatch"])
+        if stage_id and stage.get("stage_id") != stage_id:
+            continue
+        return dict(stage["dispatch"])
     return None
 
 
@@ -1887,10 +2212,27 @@ def record_stage_generation(
         return stage
     output, source_path, inputs = _validate_generation_result(root, plan_id, stage_id, generation_result, dispatch)
     attempts = stage.setdefault("attempts", [])
-    revision, destination = _next_revision(
-        episode_dir / "keyframes" / "work" / _frame_key(shot["shot_id"], frame["frame_kind"]),
-        f"-{stage['kind']}{output.suffix.lower() or '.png'}",
+    suffix = output.suffix.lower() or ".png"
+    stage_token = _work_stage_id(plan, stage)
+    work_dir = episode_dir / "keyframes" / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    destination = work_dir / _keyframe_filename(
+        shot["shot_id"], frame["frame_kind"], suffix, stage_id=stage_token
     )
+    revision = f"r{len(attempts) + 1:03d}"
+    if destination.is_file():
+        previous_revision = str(attempts[-1]["revision"]) if attempts else "r001"
+        archived = _archive_work_to_recovery(
+            root,
+            episode_dir,
+            destination,
+            shot["shot_id"],
+            frame["frame_kind"],
+            suffix,
+            previous_revision,
+            stage_token,
+        )
+        _retarget_keyframe_paths(frame, destination.relative_to(root).as_posix(), archived)
     shutil.copy2(output, destination)
     record = {
         "revision": revision,
@@ -1949,9 +2291,11 @@ def _automated_qa_covers_required_categories(stage: dict[str, Any], result: dict
 def _confirm_final_frame(root: Path, episode_dir: Path, shot: dict[str, Any], frame: dict[str, Any], stage: dict[str, Any]) -> None:
     output = stage["output"]
     source, _ = _project_image(root, output["path"], "QA 通过产图")
-    final_dir = episode_dir / "keyframes" / "final" / _frame_key(shot["shot_id"], frame["frame_kind"])
-    revision, destination = _next_revision(final_dir, source.suffix.lower() or ".png")
-    shutil.copy2(source, destination)
+    suffix = source.suffix.lower() or ".png"
+    final_dir = episode_dir / "keyframes" / "final"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    current_name = _keyframe_filename(shot["shot_id"], frame["frame_kind"], suffix)
+    destination = final_dir / current_name
     history = frame.setdefault("confirmed_revisions", [])
     previous = frame.get("confirmed_revision")
     if previous and not history:
@@ -1959,6 +2303,14 @@ def _confirm_final_frame(root: Path, episode_dir: Path, shot: dict[str, Any], fr
         # the history field was introduced.
         history.append(previous)
     previous = history[-1] if history else None
+    revision = f"r{len(history) + 1:03d}"
+    if previous and destination.is_file():
+        archive = final_dir / _keyframe_filename(
+            shot["shot_id"], frame["frame_kind"], suffix, previous.get("revision") or f"r{len(history):03d}"
+        )
+        shutil.move(str(destination), archive)
+        previous["path"] = archive.relative_to(root).as_posix()
+    shutil.copy2(source, destination)
     confirmed = {"revision": revision, "path": destination.relative_to(root).as_posix(), "sha256": _sha256(destination), "confirmed_at": _utcnow()}
     if previous:
         previous["superseded_by"] = revision

@@ -12,6 +12,7 @@ sys.path.insert(0, str(SKILL_SCRIPTS))
 from validate_director_storyboard import (  # noqa: E402
     FIVE_SECOND_SECTIONS,
     TEN_SECOND_SECTIONS,
+    parse_storyboard,
     validate_storyboard,
 )
 
@@ -222,3 +223,21 @@ class DirectorStoryboardValidationTests(unittest.TestCase):
 
         self.assertIn("全局字段“整体时长”必须在同一行包含内容", errors)
         self.assertIn("全局字段“画面规格”必须在同一行包含内容", errors)
+
+    def test_parse_storyboard_keeps_stills_and_image_prompts(self) -> None:
+        parsed = parse_storyboard(self.write_storyboard(METADATA + "\n" + FIVE_SECOND_SHOT + "\n" + TEN_SECOND_SHOT))
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["format"], "16:9 横屏，温暖动画风格。")
+        self.assertEqual([shot["shot_id"] for shot in parsed["shots"]], ["01", "02"])
+        first, second = parsed["shots"]
+        self.assertIn("小兔子蹲在地毯前", first["still_start"])
+        self.assertEqual(first["still_end"], "")
+        self.assertIn("锁已确认角色与客厅资产", first["image_prompt"])
+        self.assertEqual(first["asset_names"], ["小兔子", "妈妈", "客厅", "小车"])
+        self.assertIn("妈妈蹲在沙发旁", second["still_start"])
+        self.assertIn("妈妈回到厨房", second["still_end"])
+
+
+if __name__ == "__main__":
+    unittest.main()

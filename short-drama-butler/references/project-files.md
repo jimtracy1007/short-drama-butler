@@ -59,8 +59,9 @@ short-drama-butler/scripts/codex_image_dispatch.py
 | `keyframe-manifest.json` | 创建关键帧方案时 | “关键帧方案的确认状态、每镜帧类型与过程帧例外原因是什么？” | 供 Agent / 工具执行；状态为 `user_pending → user_confirmed`，未明确确认的过程帧会降为两帧。 |
 | `keyframe-execution.md` | 关键帧方案确认后 | “当前确认的帧图、时长、对白、声音、转场和参考素材是什么？” | v2 执行单的人类可读生产镜像；保留原分镜内容，展示当前确认文件和逐帧出图提示词。 |
 | `keyframe-execution-manifest.json` | 创建关键帧执行单时 | “某帧实际使用哪些图、经历过哪些阶段、质检和版本结果是什么？” | schema v2 的唯一机器可读状态源。每镜保留人可读 `asset_references` 与结构化 `asset_uses`，每帧保留计划、实际输入、QA 和确认 revision。 |
-| `keyframes/work/KF<镜号>-<帧类型>/rNNN-<阶段>.<扩展名>` | 已记录一次阶段出图后 | “本阶段这次尝试产出了什么？” | 不可覆盖的工作图；重新生成递增 `rNNN`，旧版本留在原处并写入 manifest 历史。 |
-| `keyframes/final/KF<镜号>-<帧类型>/rNNN.<扩展名>` | 最后阶段 QA 通过后 | “当前可作连续性锚点的确认帧是什么？” | 不可覆盖的确认图；新确认版本以 `supersedes` / `superseded_by` 关联前一版本。 |
+| `keyframes/work/KF<镜号>-<帧类型>.<扩展名>` | 已记录一次阶段出图后 | “当前这帧的工作图是什么？” | 扁平工作图，例如 `KF01-start.png`；再次出图时旧文件移到 recovery。 |
+| `keyframes/recovery/KF<镜号>-<帧类型>-rNNN.<扩展名>` | 同一帧再次出图、旧工作图让位后 | “上一版工作图还能找回吗？” | 扁平归档，例如 `KF01-start-r001.png`。 |
+| `keyframes/final/KF<镜号>-<帧类型>.<扩展名>` | 最后阶段 QA 通过后 | “当前可作连续性锚点的确认帧是什么？” | 扁平确认图，例如 `KF01-start.png`；重做时旧文件改名为 `KF01-start-r001.png`，当前确认不带版本号。 |
 | `references/user/` | 用户提供某一维度的关键帧参考图后 | “用户的这张图约束什么、适用于哪里？” | `register_user_override` 复制并记录项目内图片、SHA-256、角色和范围；不修改资产索引或角色圣经。 |
 | `references/boards/` | 不可拆关系组超过阶段图数上限时 | “经用户确认的参考板是哪张？” | 仅保存同一计划、同一关系组的已确认参考板及成员哈希；不是缺图资产的替代品。 |
 | `storyboard-package.md` | 创建这一集时，及资产确认后更新 | “分镜 Skill 必须遵守什么？” | 是。它是本集唯一正式交接包。 |
@@ -111,9 +112,9 @@ keyframe-execution.md：继承完整分镜 + 补帧图文件
 
 每帧的 `frame_spec` 必须有明确的 `continuity_contract`。无承接时为 `null`；有承接时只可引用精确的已确认前序帧，并列出要继承的空间、人物身份、道具身份或构图维度。前序帧尚未确认时，计划保持 `waiting_for_dependency`，不进入图片调用。
 
-剧本/分镜确认和关键帧方案确认仍是两道必经用户关口。之后 `prepare_keyframe_generation` 才能为一个帧图建立计划；每阶段最多 5 张输入，required 输入不能被裁剪。该步骤只做本地解析和计划，不绑定或调用任何图片、视频、剪辑平台。Codex 必须先运行 `short-drama-butler/scripts/butler.py dispatch-keyframe`，把派发单中的参考图读进当前对话后再出图；没有参考图时禁止纯文生图。实际调用方必须使用已批准输入，并通过 `butler.py record-image` 记录结果；它先验证输入路径与 SHA-256，再归档到 `keyframes/work/` 的递增 revision。
+剧本/分镜确认和关键帧方案确认仍是两道必经用户关口。之后 `prepare_keyframe_generation` 才能为一个帧图建立计划；每阶段最多 5 张输入，required 输入不能被裁剪。该步骤只做本地解析和计划，不绑定或调用任何图片、视频、剪辑平台。关键帧由子 agent 出图：本镜有几帧就派几个子 agent；精修一次点名几张就同时派几个。每个子 agent 必须先运行 `short-drama-butler/scripts/butler.py dispatch-keyframe`，把派发单中的参考图读进当前对话后再出图；主 agent 不自己出图。没有参考图时禁止纯文生图。实际调用方必须使用已批准输入，并通过 `butler.py record-image` 记录结果；它先验证输入路径与 SHA-256，再归档到 `keyframes/work/` 的递增 revision。
 
-每个阶段随后必须记录 QA。自动 QA 只有全部检查项为通过、且每项置信度至少 0.85 时才可通过；不确定、低置信度和使用参考板的结果均须用户审核。失败或否决只重做该阶段；最后阶段通过才将图片复制到 `keyframes/final/` 作为确认 revision 和连续性锚点。工作图、确认图和 Markdown 中显示的当前确认路径都由同一 manifest 更新，不覆盖旧文件。
+每个阶段随后必须记录 QA。自动 QA 只有全部检查项为通过、且每项置信度至少 0.85 时才可通过；不确定、低置信度和使用参考板的结果均须用户审核。失败或否决只重做该阶段；最后阶段通过才将图片复制到 `keyframes/final/KF01-start.png` 这类扁平文件作为当前确认和连续性锚点。重做时旧确认改名为 `KF01-start-r001.png`，不覆盖历史。工作图、确认图和 Markdown 中显示的当前确认路径都由同一 manifest 更新。
 
 用户额外提供的关键帧参考图必须声明用途与范围。人物身份/道具身份图必须明确目标资产；背景、光线、构图和风格图只约束各自维度。登记后图片进入 `references/user/` 并记录哈希；单镜覆盖优先于连续段，连续段优先于整集，同范围较新项优先，被替代项仍可追溯。不可拆关系组超出 5 图时，不能删图或假装可执行；只有用已确认资产制作、登记并由用户确认的同计划参考板，才可重新规划。
 

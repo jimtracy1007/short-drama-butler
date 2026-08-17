@@ -421,7 +421,8 @@ class AssetMigrationTests(unittest.TestCase):
             generation = record_stage_generation(root, "EP001", start_plan["plan_id"], stage["stage_id"], {
                 "plan_id": start_plan["plan_id"], "stage_id": stage["stage_id"], "dispatch_id": start_dispatch["dispatch_id"], "tool_request_id": "req-start", "prompt": start_dispatch["prompt"], "input_images": start_dispatch["input_images"], "output_path": "provider/start.png", "started_at": "2026-08-15T00:00:00Z", "completed_at": "2026-08-15T00:01:00Z",
             })
-            self.assertTrue(generation["path"].startswith("episodes/EP001_测试集/keyframes/work/KF01-start/r001-"))
+            self.assertTrue(generation["path"].endswith("keyframes/work/KF01-start.png"))
+            self.assertFalse((episode / "keyframes/work/KF01-start").is_dir())
             record_stage_qa(root, "EP001", start_plan["plan_id"], stage["stage_id"], {
                 "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:02:00Z", "checks": [{"category": "scene", "status": "pass", "confidence": 0.9, "evidence_paths": []}], "issues": [],
             })
@@ -439,12 +440,20 @@ class AssetMigrationTests(unittest.TestCase):
             record_stage_generation(root, "EP001", replacement_plan["plan_id"], replacement_stage["stage_id"], {
                 "plan_id": replacement_plan["plan_id"], "stage_id": replacement_stage["stage_id"], "dispatch_id": replacement_dispatch["dispatch_id"], "tool_request_id": "req-start-r002", "prompt": replacement_dispatch["prompt"], "input_images": replacement_dispatch["input_images"], "output_path": "provider/start-r002.png", "started_at": "2026-08-15T00:02:30Z", "completed_at": "2026-08-15T00:03:00Z",
             })
+            self.assertTrue((episode / "keyframes/work/KF01-start.png").is_file())
+            self.assertTrue((episode / "keyframes/recovery/KF01-start-r001.png").is_file())
+            self.assertFalse((episode / "keyframes/recovery/KF01-start").is_dir())
             record_stage_qa(root, "EP001", replacement_plan["plan_id"], replacement_stage["stage_id"], {
                 "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:03:30Z", "checks": [{"category": "scene", "status": "pass", "confidence": 0.95, "evidence_paths": []}], "issues": [],
             })
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             start_history = manifest["shots"][0]["frames"][0]["confirmed_revisions"]
             self.assertEqual([item["revision"] for item in start_history], ["r001", "r002"])
+            self.assertTrue(start_history[0]["path"].endswith("KF01-start-r001.png"))
+            self.assertTrue(start_history[1]["path"].endswith("KF01-start.png"))
+            self.assertTrue((root / start_history[0]["path"]).is_file())
+            self.assertTrue((root / start_history[1]["path"]).is_file())
+            self.assertFalse((episode / "keyframes/final/KF01-start").is_dir())
             self.assertEqual(start_history[0]["superseded_by"], "r002")
             self.assertEqual(start_history[1]["supersedes"], "r001")
             self.assertEqual(manifest["shots"][0]["frames"][0]["confirmed_revision"]["revision"], "r002")
@@ -456,6 +465,7 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertEqual(end_roles[0], "background")
             self.assertIn("continuity", end_roles)
             self.assertNotEqual(end_roles[0], "edit_target")
+            self.assertNotIn("continuity", end_stage["required_qa_categories"])
             end_dispatch = begin_stage_generation(root, "EP001", end_plan["plan_id"], end_stage["stage_id"])
             self.write_file(root, "provider/end.png", b"end-result")
             record_stage_generation(root, "EP001", end_plan["plan_id"], end_stage["stage_id"], {
@@ -472,6 +482,7 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertEqual(confirmed["status"], "qa_passed")
             manifest = json.loads((episode / "keyframe-execution-manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["shots"][0]["frames"][1]["status"], "confirmed")
+            self.assertTrue(manifest["shots"][0]["frames"][1]["confirmed_revision"]["path"].endswith("KF01-end.png"))
             self.assertTrue((root / manifest["shots"][0]["frames"][1]["confirmed_revision"]["path"]).is_file())
             self.write_file(root, "uploads/beach.png", b"user-beach")
             override = register_user_override(root, "EP001", {"path": "uploads/beach.png", "role": "background", "scope": "shot", "scope_ids": ["01"]})
@@ -511,35 +522,30 @@ class AssetMigrationTests(unittest.TestCase):
                 "frame_specs": {"start": {"continuity_contract": None, "allowed_changes": ["咕噜举起贝壳"], "invariants": ["海滩、咕噜和贝壳身份"]}},
             }])
             plan = prepare_keyframe_generation(root, "EP002", "01", "start")
-            background_stage, subject_stage = plan["stages"]
-            self.assertEqual(set(background_stage["required_qa_categories"]), {"scene"})
-            self.assertEqual(set(subject_stage["required_qa_categories"]), {"character", "continuity", "prop"})
-            background_dispatch = begin_stage_generation(root, "EP002", plan["plan_id"], background_stage["stage_id"])
-            self.write_file(root, "provider/ep002-background.png", b"ep002-background")
-            record_stage_generation(root, "EP002", plan["plan_id"], background_stage["stage_id"], {
-                "plan_id": plan["plan_id"], "stage_id": background_stage["stage_id"], "dispatch_id": background_dispatch["dispatch_id"], "tool_request_id": "req-ep002-background", "prompt": background_dispatch["prompt"], "input_images": background_dispatch["input_images"], "output_path": "provider/ep002-background.png", "started_at": "2026-08-15T01:00:00Z", "completed_at": "2026-08-15T01:01:00Z",
+            self.assertEqual(len(plan["stages"]), 1)
+            stage = plan["stages"][0]
+            self.assertEqual(stage["kind"], "composite")
+            self.assertEqual(stage["mode"], "generate")
+            self.assertEqual(set(stage["required_qa_categories"]), {"scene", "character", "prop"})
+            dispatch = begin_stage_generation(root, "EP002", plan["plan_id"], stage["stage_id"])
+            self.write_file(root, "provider/ep002-composite.png", b"ep002-composite")
+            record_stage_generation(root, "EP002", plan["plan_id"], stage["stage_id"], {
+                "plan_id": plan["plan_id"], "stage_id": stage["stage_id"], "dispatch_id": dispatch["dispatch_id"], "tool_request_id": "req-ep002-composite", "prompt": dispatch["prompt"], "input_images": dispatch["input_images"], "output_path": "provider/ep002-composite.png", "started_at": "2026-08-15T01:00:00Z", "completed_at": "2026-08-15T01:01:00Z",
             })
-            record_stage_qa(root, "EP002", plan["plan_id"], background_stage["stage_id"], {
+            record_stage_qa(root, "EP002", plan["plan_id"], stage["stage_id"], {
                 "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T01:02:00Z",
-                "checks": [{"category": "scene", "status": "pass", "confidence": 0.95, "evidence_paths": []}], "issues": [],
-            })
-            subject_dispatch = begin_stage_generation(root, "EP002", plan["plan_id"], subject_stage["stage_id"])
-            self.write_file(root, "provider/ep002-subjects.png", b"ep002-subjects")
-            record_stage_generation(root, "EP002", plan["plan_id"], subject_stage["stage_id"], {
-                "plan_id": plan["plan_id"], "stage_id": subject_stage["stage_id"], "dispatch_id": subject_dispatch["dispatch_id"], "tool_request_id": "req-ep002-subjects", "prompt": subject_dispatch["prompt"], "input_images": subject_dispatch["input_images"], "output_path": "provider/ep002-subjects.png", "started_at": "2026-08-15T01:03:00Z", "completed_at": "2026-08-15T01:04:00Z",
-            })
-            record_stage_qa(root, "EP002", plan["plan_id"], subject_stage["stage_id"], {
-                "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T01:05:00Z",
                 "checks": [
+                    {"category": "scene", "status": "pass", "confidence": 0.95, "evidence_paths": []},
                     {"category": "character", "status": "pass", "confidence": 0.95, "evidence_paths": []},
                     {"category": "prop", "status": "pass", "confidence": 0.95, "evidence_paths": []},
-                    {"category": "continuity", "status": "pass", "confidence": 0.95, "evidence_paths": []},
                 ], "issues": [],
             })
             manifest = json.loads((episode / "keyframe-execution-manifest.json").read_text(encoding="utf-8"))
             frame = manifest["shots"][0]["frames"][0]
             self.assertEqual(frame["status"], "confirmed")
+            self.assertTrue(frame["confirmed_revision"]["path"].endswith("KF01-start.png"))
             self.assertTrue((root / frame["confirmed_revision"]["path"]).is_file())
+            self.assertFalse((episode / "keyframes/final/KF01-start").is_dir())
 
     def test_v2_reference_board_requires_registration_and_user_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -585,22 +591,20 @@ class AssetMigrationTests(unittest.TestCase):
             self.assertTrue(approved["approved"])
             plan = prepare_keyframe_generation(root, "EP001", "01", "start")
             self.assertEqual(plan["status"], "planned")
-            background_stage, board_stage = plan["stages"]
-            background_dispatch = begin_stage_generation(root, "EP001", plan["plan_id"], background_stage["stage_id"])
-            self.write_file(root, "provider/background.png", b"background")
-            background_output = record_stage_generation(root, "EP001", plan["plan_id"], background_stage["stage_id"], {
-                "plan_id": plan["plan_id"], "stage_id": background_stage["stage_id"], "dispatch_id": background_dispatch["dispatch_id"], "tool_request_id": "req-background", "prompt": background_dispatch["prompt"], "input_images": background_dispatch["input_images"], "output_path": "provider/background.png", "started_at": "2026-08-15T00:00:00Z", "completed_at": "2026-08-15T00:01:00Z",
-            })
-            record_stage_qa(root, "EP001", plan["plan_id"], background_stage["stage_id"], {
-                "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:02:00Z", "checks": [{"category": "scene", "status": "pass", "confidence": 0.99, "evidence_paths": []}], "issues": [],
-            })
+            self.assertEqual(len(plan["stages"]), 1)
+            stage = plan["stages"][0]
+            self.assertEqual(stage["kind"], "composite")
+            dispatch = begin_stage_generation(root, "EP001", plan["plan_id"], stage["stage_id"])
             self.write_file(root, "provider/frame.png", b"frame")
-            board_dispatch = begin_stage_generation(root, "EP001", plan["plan_id"], board_stage["stage_id"])
-            record_stage_generation(root, "EP001", plan["plan_id"], board_stage["stage_id"], {
-                "plan_id": plan["plan_id"], "stage_id": board_stage["stage_id"], "dispatch_id": board_dispatch["dispatch_id"], "tool_request_id": "req-board", "prompt": board_dispatch["prompt"], "input_images": board_dispatch["input_images"], "output_path": "provider/frame.png", "started_at": "2026-08-15T00:03:00Z", "completed_at": "2026-08-15T00:04:00Z",
+            record_stage_generation(root, "EP001", plan["plan_id"], stage["stage_id"], {
+                "plan_id": plan["plan_id"], "stage_id": stage["stage_id"], "dispatch_id": dispatch["dispatch_id"], "tool_request_id": "req-board", "prompt": dispatch["prompt"], "input_images": dispatch["input_images"], "output_path": "provider/frame.png", "started_at": "2026-08-15T00:03:00Z", "completed_at": "2026-08-15T00:04:00Z",
             })
-            record_stage_qa(root, "EP001", plan["plan_id"], board_stage["stage_id"], {
-                "status": "pass", "reviewer_type": "automated", "checked_at": "2026-08-15T00:05:00Z", "checks": [{"category": "character", "status": "pass", "confidence": 0.99, "evidence_paths": []}], "issues": [],
+            record_stage_qa(root, "EP001", plan["plan_id"], stage["stage_id"], {
+                "status": "pass", "reviewer_type": "user", "checked_at": "2026-08-15T00:05:00Z",
+                "checks": [
+                    {"category": "scene", "status": "pass", "confidence": 0.99, "evidence_paths": []},
+                    {"category": "character", "status": "pass", "confidence": 0.99, "evidence_paths": []},
+                ], "issues": [],
             })
             with self.assertRaisesRegex(ValueError, "不允许准备"):
                 prepare_keyframe_generation(root, "EP001", "01", "start")

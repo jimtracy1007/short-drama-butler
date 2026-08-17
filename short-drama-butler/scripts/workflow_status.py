@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from keyframe_prompt import load_parsed_storyboard, missing_time_scene_views
 from project_files import (
     episode_creation_gate,
     normalize_asset_drafts,
@@ -72,6 +73,10 @@ def list_episodes(project_root: Path) -> list[dict[str, Any]]:
     return episodes
 
 
+GENERATE_STATUSES = {"planned", "failed", "needs_regeneration"}
+QA_STAGE_STATUSES = {"generated", "pending_review"}
+
+
 def _pending_frames(manifest: dict[str, Any]) -> list[dict[str, str]]:
     pending: list[dict[str, str]] = []
     for shot in manifest.get("shots", []):
@@ -85,6 +90,137 @@ def _pending_frames(manifest: dict[str, Any]) -> list[dict[str, str]]:
                     }
                 )
     return pending
+
+
+def _current_stage(frame: dict[str, Any]) -> dict[str, Any] | None:
+    current_id = frame.get("current_plan_id")
+    plan = next((item for item in frame.get("plans") or [] if item.get("plan_id") == current_id), None)
+    if not plan:
+        return None
+    for stage in plan.get("stages") or []:
+        if stage.get("status") in {"generating", "generated", "pending_review"}:
+            return stage
+    return None
+
+
+def _awaiting_qa(frame: dict[str, Any]) -> bool:
+    if frame.get("status") == "pending_review":
+        return True
+    stage = _current_stage(frame)
+    return bool(stage and stage.get("status") in QA_STAGE_STATUSES)
+
+
+def _blocked_by_unconfirmed_predecessor(manifest: dict[str, Any], frame: dict[str, Any]) -> bool:
+    contract = (frame.get("frame_spec") or {}).get("continuity_contract")
+    if not contract:
+        return False
+    predecessor = contract.get("predecessor") or {}
+    shot_id = str(predecessor.get("shot_id") or "").zfill(2)
+    frame_kind = str(predecessor.get("frame_kind") or "")
+    for shot in manifest.get("shots") or []:
+        if str(shot.get("shot_id") or "").zfill(2) != shot_id:
+            continue
+        for candidate in shot.get("frames") or []:
+            if str(candidate.get("frame_kind")) == frame_kind:
+                return candidate.get("status") != "confirmed"
+    return True
+
+
+def _frame_ref(shot: dict[str, Any], frame: dict[str, Any]) -> dict[str, str]:
+    return {
+        "shot_id": str(shot.get("shot_id")),
+        "frame_kind": str(frame.get("frame_kind")),
+        "status": str(frame.get("status")),
+    }
+
+
+REGEN_STATUSES = {"failed", "needs_regeneration"}
+
+
+def keyframe_work(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Pick the next generate or review batch. Every still is a sub-agent."""
+    regen: list[dict[str, str]] = []
+    for shot in manifest.get("shots") or []:
+        for frame in shot.get("frames") or []:
+            if frame.get("status") in REGEN_STATUSES and not _blocked_by_unconfirmed_predecessor(manifest, frame):
+                regen.append(_frame_ref(shot, frame))
+    if regen:
+        shot_ids = {item["shot_id"] for item in regen}
+        return {
+            "mode": "spawn_subagents",
+            "shot_id": next(iter(shot_ids)) if len(shot_ids) == 1 else "",
+            "frames": regen,
+            "in_flight": [],
+        }
+
+    for shot in manifest.get("shots") or []:
+        incomplete = [frame for frame in shot.get("frames") or [] if frame.get("status") != "confirmed"]
+        if not incomplete:
+            continue
+        generate = [
+            frame
+            for frame in incomplete
+            if frame.get("status") in GENERATE_STATUSES and not _blocked_by_unconfirmed_predecessor(manifest, frame)
+        ]
+        in_flight = [frame for frame in incomplete if frame.get("status") == "generating" and not _awaiting_qa(frame)]
+        review = [frame for frame in incomplete if _awaiting_qa(frame)]
+        if generate:
+            return {
+                "mode": "spawn_subagents",
+                "shot_id": str(shot.get("shot_id")),
+                "frames": [_frame_ref(shot, frame) for frame in generate],
+                "in_flight": [_frame_ref(shot, frame) for frame in in_flight],
+            }
+        if in_flight:
+            return {
+                "mode": "wait_subagents",
+                "shot_id": str(shot.get("shot_id")),
+                "frames": [_frame_ref(shot, frame) for frame in in_flight],
+            }
+        if review:
+            return {
+                "mode": "review",
+                "shot_id": str(shot.get("shot_id")),
+                "frames": [_frame_ref(shot, frame) for frame in review],
+            }
+    return {"mode": "done", "frames": []}
+
+
+def _keyframe_actions(episode_id: str, work: dict[str, Any]) -> list[str]:
+    frames = list(work.get("frames") or [])
+    in_flight = list(work.get("in_flight") or [])
+    if work.get("mode") == "spawn_subagents":
+        dispatches = [
+            f"butler.py dispatch-keyframe --episode {episode_id} --shot {item['shot_id']} --frame {item['frame_kind']}"
+            for item in frames
+        ]
+        total = len(frames) + len(in_flight)
+        refining = any(item.get("status") in REGEN_STATUSES for item in frames + in_flight)
+        kind = "（含精修/重做）" if refining else ""
+        shots = "、".join(dict.fromkeys(item["shot_id"] for item in frames))
+        where = f"镜头 {shots}" if shots else "本批"
+        return [
+            (
+                f"{where} 有 {total} 帧要出图{kind}："
+                f"同时派 {len(frames)} 个子 agent，每帧一个；主 agent 不自己出图、不读参考图，"
+                "等全部 record-image 后一起审核。"
+            ),
+            *dispatches,
+            "子 agent 只做 dispatch-keyframe → 先原样输出 brief.text → 读参考图 → 按冻结 prompt 出图 → record-image，不要 record-qa。",
+            "主 agent 审核身份、场景结构、时段和分镜姿势；空间结构不一致必须 fail。通过后才 record-qa。",
+        ]
+    if work.get("mode") == "wait_subagents":
+        waiting = "、".join(f"{item['shot_id']}/{item['frame_kind']}" for item in frames)
+        return [f"等待子 agent 完成 {waiting} 的 record-image，主 agent 不要重派同一帧，也不要自己出图。"]
+    if work.get("mode") == "review":
+        names = "、".join(f"{item['shot_id']}/{item['frame_kind']}" for item in frames)
+        return [
+            f"主 agent 审核 {names}：对照场景母版查墙体/开口/固定家具，对照角色母版查身份，对照分镜查姿势。",
+            "通过则 butler.py record-qa --episode "
+            f"{episode_id} --dispatch <dispatch_id> --status pass --check scene=pass:0.9 --check character=pass:0.9；"
+            "空间结构不一致或开关错位则 fail，再 refine-keyframe；失败几张就派几个子 agent 重出，主 agent 不要自己出图。",
+        ]
+    return []
 
 
 def _next_episode_id(project_root: Path) -> str:
@@ -114,6 +250,23 @@ def _asset_actions(episode_id: str, asset: dict[str, Any]) -> list[str]:
         f"butler.py provide-asset --episode {episode_id} --name {asset['name']} --image front=<路径>",
         f"用户确认后：butler.py confirm-asset --episode {episode_id} --name {asset['name']}",
     ]
+
+
+def _missing_time_actions(project_root: Path, episode_dir: Path, episode_id: str) -> tuple[list[dict[str, str]], list[str]]:
+    parsed = load_parsed_storyboard(episode_dir / "storyboard.md")
+    missing = missing_time_scene_views(project_root, parsed)
+    if not missing:
+        return [], []
+    actions = [
+        (
+            f"先为「{item['name']}」补 {item['needed_view']} 时段母版："
+            f"butler.py dispatch-asset --episode {episode_id} --name {item['name']}，"
+            f"provide-asset 时带 {item['needed_view']}=<图>，再 confirm-asset。"
+            "没有对应时段场景图就出关键帧，只会画错再精修。"
+        )
+        for item in missing
+    ]
+    return missing, actions
 
 
 def episode_status(project_root: Path, episode_id: str) -> dict[str, Any]:
@@ -256,8 +409,13 @@ def episode_status(project_root: Path, episode_id: str) -> dict[str, Any]:
         result["stage"] = "script_approved"
         result["summary"] = "剧本和分镜已确认；下一步规划每镜关键帧数量。"
         result["next_actions"] = [
-            f"butler.py plan-keyframes --episode {episode_id} --shots-file <shots.json>",
+            f"butler.py plan-keyframes --episode {episode_id}",
         ]
+        missing, extra = _missing_time_actions(root, episode_dir, episode_id)
+        if missing:
+            result["missing_time_views"] = missing
+            result["summary"] = "剧本和分镜已确认；先补夜景/黄昏/黎明场景母版，再规划关键帧。"
+            result["next_actions"] = extra + result["next_actions"]
         return result
 
     if keyframe_plan.get("status") != "user_confirmed":
@@ -272,8 +430,13 @@ def episode_status(project_root: Path, episode_id: str) -> dict[str, Any]:
         result["stage"] = "keyframe_plan_approved"
         result["summary"] = "关键帧方案已确认；下一步建立 v2 执行单。"
         result["next_actions"] = [
-            f"butler.py create-execution --episode {episode_id} --details-file <details.json>",
+            f"butler.py create-execution --episode {episode_id}",
+            "不要手写缩水版提示词；系统从分镜本帧画面、视觉锁和已确认资产拼装。",
         ]
+        missing, extra = _missing_time_actions(root, episode_dir, episode_id)
+        if missing:
+            result["missing_time_views"] = missing
+            result["next_actions"] = extra + result["next_actions"]
         return result
 
     if execution.get("schema_version") != 2:
@@ -287,16 +450,23 @@ def episode_status(project_root: Path, episode_id: str) -> dict[str, Any]:
 
     pending = _pending_frames(execution)
     result["pending_frames"] = pending
+    missing, extra = _missing_time_actions(root, episode_dir, episode_id)
+    if missing:
+        result["missing_time_views"] = missing
     if pending:
         first = pending[0]
+        work = keyframe_work(execution)
+        result["keyframe_work"] = work
         result["stage"] = "keyframes_in_progress"
         result["summary"] = f"还有 {len(pending)} 帧未确认。"
-        result["next_actions"] = [
+        result["next_actions"] = _keyframe_actions(episode_id, work) or [
             f"butler.py dispatch-keyframe --episode {episode_id} --shot {first['shot_id']} --frame {first['frame_kind']}",
-            "对返回的 view_image_paths 逐张读图（角色/场景/道具母版为身份锁；上一镜仅辅助连续性，不得当唯一或主参考），再用同一 prompt 出图。",
-            f"butler.py record-image --episode {episode_id} --dispatch <dispatch_id> --output <生成图路径>",
-            f"butler.py record-qa --episode {episode_id} --dispatch <dispatch_id> --status pass --check scene=pass:0.9",
         ]
+        if missing:
+            result["summary"] = (
+                f"还有 {len(pending)} 帧未确认；先补夜景/黄昏/黎明场景母版，再出关键帧。"
+            )
+            result["next_actions"] = extra + result["next_actions"]
         return result
 
     result["stage"] = "keyframes_done"

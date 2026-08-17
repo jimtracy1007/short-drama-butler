@@ -21,7 +21,21 @@ MASTER_IDENTITY_ROLES = {"background", "character_identity", "prop_identity"}
 CONTINUITY_DIMENSIONS = {"space", "character_identity", "prop_identity", "composition"}
 SCOPE_PRIORITY = {"episode": 0, "continuity_run": 1, "shot": 2}
 CHARACTER_VIEWS = ("front", "side", "back", "expression-sheet")
-SCENE_VIEWS = ("front", "reverse", "side", "wide", "top")
+SCENE_VIEWS = ("front", "reverse", "side", "wide", "top", "day", "night", "dusk", "dawn")
+TIME_OF_DAY = ("day", "night", "dusk", "dawn")
+STRICT_TIME_OF_DAY = frozenset({"night", "dusk", "dawn"})
+TIME_VIEW_ALIASES = {
+    "night": ("night",),
+    "dusk": ("dusk", "sunset"),
+    "dawn": ("dawn", "sunrise"),
+    "day": ("day", "front", "wide"),
+}
+TIME_KEYWORDS = (
+    ("night", ("深夜", "夜里", "夜晚", "晚上", "半夜", "月夜", "夜空", "月光", "夜灯", "怕黑", "night", "moonlit")),
+    ("dusk", ("黄昏", "傍晚", "日落", "dusk", "sunset")),
+    ("dawn", ("黎明", "拂晓", "日出", "dawn", "sunrise")),
+    ("day", ("白天", "日光", "阳光", "白昼", "daytime", "daylight")),
+)
 SCHEDULING_METADATA = ("relationship_group", "subject_tier", "priority", "continuity_relevant")
 PHASE_NAMES = ("background", "primary_subjects", "secondary_subjects")
 
@@ -75,16 +89,99 @@ def _view_order(asset: dict[str, Any], requested: str | None) -> tuple[str, ...]
     return standard
 
 
-def _select_view(asset: dict[str, Any], requested: str | None) -> tuple[dict[str, Any], str | None]:
+def infer_time_of_day(*texts: object) -> str | None:
+    """Return a canonical time of day when the storyboard text is explicit."""
+    blob = " ".join(str(text or "") for text in texts)
+    if not blob.strip():
+        return None
+    for time_of_day, keywords in TIME_KEYWORDS:
+        if any(keyword in blob for keyword in keywords):
+            return time_of_day
+    return None
+
+
+def shot_time_of_day(shot: dict[str, Any], frame_spec: dict[str, Any] | None = None) -> str | None:
+    """Prefer an explicit shot field, then infer from scene and prompts."""
+    explicit = shot.get("time_of_day")
+    if explicit in TIME_OF_DAY:
+        return str(explicit)
+    prompts = shot.get("frame_prompts") or {}
+    return infer_time_of_day(
+        shot.get("scene"),
+        shot.get("storyboard_image_prompt"),
+        shot.get("start_state"),
+        shot.get("motion"),
+        shot.get("end_state"),
+        *(prompts.values() if isinstance(prompts, dict) else ()),
+        (frame_spec or {}).get("prompt"),
+    )
+
+
+def apply_background_time_views(
+    asset_uses: list[dict[str, Any]], time_of_day: str | None
+) -> list[dict[str, Any]]:
+    """Pin background plates to the shot's time of day without inventing camera views."""
+    if time_of_day not in TIME_OF_DAY:
+        return [dict(item) for item in asset_uses]
+    applied: list[dict[str, Any]] = []
+    for item in asset_uses:
+        copied = dict(item)
+        if copied.get("role") == "background":
+            copied["time_of_day"] = time_of_day
+            copied["view_hint"] = time_of_day
+        applied.append(copied)
+    return applied
+
+
+def background_time_mismatch(
+    shot: dict[str, Any],
+    input_images: list[dict[str, Any]] | None,
+    frame_spec: dict[str, Any] | None = None,
+) -> str | None:
+    """Return a stop reason when a night/dusk/dawn shot is locked to a daytime plate."""
+    time_of_day = shot_time_of_day(shot, frame_spec)
+    if time_of_day not in STRICT_TIME_OF_DAY:
+        return None
+    aliases = TIME_VIEW_ALIASES[time_of_day]
+    for item in input_images or []:
+        if item.get("role") != "background":
+            continue
+        selected = str(item.get("selected_view") or "")
+        path = str(item.get("path") or "")
+        stem = Path(path).stem.lower()
+        if selected in aliases or stem in aliases or any(stem.endswith(f"-{alias}") for alias in aliases):
+            continue
+        name = item.get("name") or item.get("asset_id") or "场景"
+        return (
+            f"场景「{name}」当前视图是 {selected or stem or '未标注'}，本镜需要 {time_of_day}。"
+            f"请先 dispatch-asset 补 {time_of_day}=<对应时段场景图> 并 confirm-asset，不要用白天母版出夜戏。"
+        )
+    return None
+
+
+def _select_view(
+    asset: dict[str, Any], requested: str | None, *, required_variants: tuple[str, ...] | None = None
+) -> tuple[dict[str, Any], str | None]:
     views = {view.get("variant"): view for view in asset.get("views", []) if view.get("variant") and view.get("path")}
     if not views and asset.get("destination"):
         views = {"reference": {"variant": "reference", "path": asset["destination"]}}
-    for variant in _view_order(asset, requested):
+    order = required_variants or _view_order(asset, requested)
+    for variant in order:
         view = views.get(variant)
-        if view:
-            if requested and variant != requested:
-                return view, f"requested view '{requested}' unavailable; fell back to '{variant}'"
+        if not view:
+            continue
+        if required_variants:
             return view, None
+        if requested and variant != requested:
+            return view, f"requested view '{requested}' unavailable; fell back to '{variant}'"
+        return view, None
+    if required_variants:
+        name = asset.get("name") or asset.get("asset_id") or "unknown"
+        wanted = requested or required_variants[0]
+        raise KeyframeConsistencyError(
+            f"场景「{name}」没有已确认的 {wanted} 视图，不能出该时段关键帧。"
+            f"请先 dispatch-asset 补 {wanted}=<夜晚或对应时段场景图> 并 confirm-asset。"
+        )
     fallback = next(iter(views.values()), None)
     if fallback:
         reason = f"standard views unavailable; fell back to '{fallback['variant']}'"
@@ -127,7 +224,17 @@ def resolve_keyframe_asset_uses(project_root: Path, asset_uses: list[dict[str, A
             raise KeyframeConsistencyError(f"素材名称歧义：{reference}")
         asset = matches[0]
         requested = asset_use.get("view_hint") or asset_use.get("facing")
-        view, fallback_reason = _select_view(asset, requested)
+        time_of_day = asset_use.get("time_of_day") if asset_use.get("time_of_day") in TIME_OF_DAY else None
+        if role == "background" and time_of_day:
+            requested = time_of_day
+        required_variants = TIME_VIEW_ALIASES.get(str(requested)) if requested in TIME_OF_DAY else None
+        if required_variants and requested not in STRICT_TIME_OF_DAY:
+            # Daytime plates may be registered as front/wide; still prefer an explicit day view.
+            available = {view.get("variant") for view in asset.get("views", []) if view.get("variant") and view.get("path")}
+            if not available and asset.get("destination"):
+                available = {"reference"}
+            required_variants = tuple(variant for variant in required_variants if variant in available) or None
+        view, fallback_reason = _select_view(asset, requested, required_variants=required_variants)
         source, relative_path = _project_file(root, str(view["path"]))
         item = {
             "asset_id": asset["asset_id"],
@@ -313,7 +420,38 @@ def _group_sort_key(group: list[dict[str, Any]]) -> tuple[int, tuple[int, str, s
 
 
 def _stage_kind(entries: list[dict[str, Any]]) -> str:
-    return PHASE_NAMES[_candidate_phase(entries[0])] if entries else "background"
+    content_entries = [item for item in entries if item.get("role") not in {"continuity", "edit_target"}]
+    if not content_entries:
+        return "background"
+    phases = {_candidate_phase(item) for item in content_entries}
+    if phases == {0}:
+        return "background"
+    if 0 in phases and phases - {0}:
+        return "composite"
+    return PHASE_NAMES[min(phases)]
+
+
+LIGHTING_LOCK = (
+    "时间、光线和窗外氛围以场景母版和本帧提示词为准，不得改成另一种时段。"
+)
+EMPTY_BACKGROUND_LOCK = (
+    "当前阶段仅生成场景空间与灯光底图，不生成任何人物、动物、角色或其他前景主体。"
+)
+QA_GUIDANCE = (
+    "质检只锁身份、空间和时段；分镜要求的走位、姿势、视线变化必须通过，"
+    "不得用上一帧站位否决本帧动作。"
+)
+
+
+def _stage_prompt(frame_prompt: str, stage_kind: str) -> str:
+    """Keep lighting on every stage; only empty overflow plates omit subjects."""
+    prompt = str(frame_prompt or "").strip()
+    suffix = LIGHTING_LOCK
+    if stage_kind == "background":
+        suffix = f"{LIGHTING_LOCK}{EMPTY_BACKGROUND_LOCK}"
+    if not prompt:
+        return suffix
+    return f"{prompt} {suffix}"
 
 
 def _approved_board(
@@ -353,7 +491,12 @@ def _validate_anchor(anchor: dict[str, Any], contract: dict[str, Any]) -> dict[s
     }
 
 
-def _has_master_identity(entries: list[dict[str, Any]]) -> bool:
+def _has_subject_identity(entries: list[dict[str, Any]]) -> bool:
+    """Return whether a stage has a subject master that can safely use a prior frame."""
+    return any(item.get("role") in {"character_identity", "prop_identity", "reference_board"} for item in entries)
+
+
+def _has_master_lock(entries: list[dict[str, Any]]) -> bool:
     return any(item.get("role") in MASTER_IDENTITY_ROLES or item.get("role") == "reference_board" for item in entries)
 
 
@@ -366,10 +509,18 @@ def _attach_previous_shot_auxiliary(
     if not anchor_input:
         return
     first = stages[0] if stages else None
-    if first is not None and _has_master_identity(first) and len(first) < MAX_INPUT_IMAGES:
+    all_entries = [item for stage in stages for item in stage]
+    shot_has_subjects = _has_subject_identity(all_entries)
+    first_is_empty_plate = first is not None and not _has_subject_identity(first)
+    if first is not None and shot_has_subjects and first_is_empty_plate:
+        unselected_optional.append(
+            {**anchor_input, "reason": "previous shot cannot be the only or primary identity reference"}
+        )
+        return
+    if first is not None and _has_master_lock(first) and len(first) < MAX_INPUT_IMAGES:
         first.append(anchor_input)
         return
-    if first is not None and _has_master_identity(first):
+    if first is not None and _has_master_lock(first):
         reason = "previous-shot auxiliary dropped to keep required masters under 5-image cap"
     else:
         reason = "previous shot cannot be the only or primary identity reference"
@@ -386,13 +537,16 @@ def build_generation_plan(
 ) -> dict[str, Any]:
     """Build a deterministic required-first plan without side effects.
 
-    A generate stage can take five references.  Confirmed previous-shot frames
-    are optional continuity auxiliaries: they never replace required character,
-    scene, or prop masters, and they are dropped before any required master when
-    the 5-image cap is full.  Later stages still use one previous_stage
-    edit_target plus at most four new inputs.  Relationship groups are atomic;
-    an oversized group returns the explicit ``reference_board_required`` signal
-    unless a matching approved board exists.
+    A generate stage can take five references.  Required masters that fit in
+    those five share one generate stage even when they belong to different
+    phases, unless the frame explicitly requests ``force_staged_edit`` to
+    protect a confirmed scene from subject-driven redraw.  Confirmed
+    previous-shot frames are optional continuity auxiliaries: they never
+    replace required character, scene, or prop masters, and they are dropped
+    before any required master when the 5-image cap is full.  Later stages
+    reserve one slot for previous_stage edit_target.  Relationship groups are
+    atomic; an oversized group returns the explicit
+    ``reference_board_required`` signal unless a matching approved board exists.
     """
     if not plan_id:
         raise KeyframeConsistencyError("plan_id 不能为空")
@@ -468,12 +622,18 @@ def build_generation_plan(
     stage_phases: list[int] = []
     for group in normalized_groups:
         group_phase = _group_phase(group)
-        last_stage_capacity = MAX_INPUT_IMAGES if len(stages) == 1 else MAX_INPUT_IMAGES - 1
-        if stages and stage_phases[-1] == group_phase and len(stages[-1]) + len(group) <= last_stage_capacity:
-            stages[-1].extend(group)
-        else:
-            stages.append(list(group))
-            stage_phases.append(group_phase)
+        if stages:
+            previous_phases = {_candidate_phase(item) for item in stages[-1]}
+            if frame_spec.get("force_staged_edit") is True and 0 in previous_phases and group_phase > 0:
+                stages.append(list(group))
+                stage_phases.append(group_phase)
+                continue
+            capacity = MAX_INPUT_IMAGES if len(stages) == 1 else MAX_INPUT_IMAGES - 1
+            if len(stages[-1]) + len(group) <= capacity:
+                stages[-1].extend(group)
+                continue
+        stages.append(list(group))
+        stage_phases.append(group_phase)
 
     if not stages:
         stages = [[]]
@@ -514,7 +674,10 @@ def build_generation_plan(
             required_qa_categories.add("character")
         if "prop_identity" in roles:
             required_qa_categories.add("prop")
-        if "edit_target" in roles or "continuity" in roles:
+        # Intra-frame edit_target must not drift identity. A previous-shot
+        # continuity still image is auxiliary blocking, not a pose lock, so it
+        # does not create a required continuity QA gate.
+        if "edit_target" in roles:
             required_qa_categories.add("continuity")
         planned_stages.append(
             {
@@ -523,13 +686,14 @@ def build_generation_plan(
                 "mode": mode,
                 "kind": _stage_kind(entries),
                 "input_images": inputs,
-                # The frame prompt is the immutable, adapter-facing prompt for
-                # every stage of this plan revision.  A changed prompt requires
-                # a new plan revision; it is never supplied ad hoc at completion.
-                "prompt": str(frame_spec.get("prompt", "")),
+                # Each stage prompt is immutable once dispatched. Lighting
+                # follows the scene master and frame prompt on every stage;
+                # only overflow background plates omit subjects.
+                "prompt": _stage_prompt(frame_spec.get("prompt", ""), _stage_kind(entries)),
                 "allowed_changes": list(frame_spec.get("allowed_changes", [])),
                 "invariants": list(frame_spec.get("invariants", [])),
                 "required_qa_categories": sorted(required_qa_categories),
+                "qa_guidance": QA_GUIDANCE,
             }
         )
 
@@ -563,7 +727,27 @@ def build_generation_plan(
             if len(planned_stages) == 1 and planned_stages[0]["mode"] == "generate"
             else "staged_edit"
         ),
+        "force_staged_edit": frame_spec.get("force_staged_edit") is True,
         "continuity_anchor": anchor_input,
         "stages": planned_stages,
         "unselected_optional": unselected_optional,
     }
+
+
+def is_obsolete_phase_split_plan(plan: dict[str, Any] | None) -> bool:
+    """Return whether an old background-then-character plan should be rebuilt."""
+    if not plan or plan.get("force_staged_edit") is True:
+        return False
+    stages = plan.get("stages") or []
+    if len(stages) < 2 or (stages[0] or {}).get("kind") != "background":
+        return False
+    later = [(stage or {}).get("kind") for stage in stages[1:]]
+    if not any(kind in {"primary_subjects", "secondary_subjects", "composite"} for kind in later):
+        return False
+    master_ids = {
+        item.get("asset_id")
+        for stage in stages
+        for item in stage.get("input_images") or []
+        if item.get("role") in MASTER_IDENTITY_ROLES and item.get("asset_id")
+    }
+    return 0 < len(master_ids) <= MAX_INPUT_IMAGES

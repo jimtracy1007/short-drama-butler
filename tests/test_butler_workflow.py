@@ -11,7 +11,7 @@ from pathlib import Path
 SKILL_SCRIPTS = Path(__file__).parents[1] / "short-drama-butler" / "scripts"
 sys.path.insert(0, str(SKILL_SCRIPTS))
 
-from butler import build_parser  # noqa: E402
+from butler import build_parser, _parse_refine_item  # noqa: E402
 from codex_image_dispatch import dispatch_asset, dispatch_keyframe, inspect_image_generation_context  # noqa: E402
 from image_canon import ImageCanonError  # noqa: E402
 from project_files import (  # noqa: E402
@@ -420,7 +420,13 @@ class ButlerWorkflowTests(unittest.TestCase):
             )
             first = dispatch_keyframe(root, "EP002", "01", "start")
             self.assertTrue(first["allowed"])
-            self.assertEqual(first["view_image_paths"], ["assets/global/scenes/S03_bay/front.png"])
+            self.assertEqual(
+                set(first["view_image_paths"]),
+                {
+                    "assets/global/scenes/S03_bay/front.png",
+                    "assets/global/characters/C01_gulu/front.png",
+                },
+            )
             output = self.write_file(root, "generated/kf.png", b"frame")
             record_stage_generation(
                 root,
@@ -448,14 +454,15 @@ class ButlerWorkflowTests(unittest.TestCase):
                     "status": "pass",
                     "reviewer_type": "automated",
                     "checked_at": "2026-01-01T00:00:02+00:00",
-                    "checks": [{"category": "scene", "status": "pass", "confidence": 0.95, "evidence_paths": []}],
+                    "checks": [
+                        {"category": "scene", "status": "pass", "confidence": 0.95, "evidence_paths": []},
+                        {"category": "character", "status": "pass", "confidence": 0.95, "evidence_paths": []},
+                    ],
                     "issues": [],
                 },
             )
-            second = dispatch_keyframe(root, "EP002", "01", "start")
-            self.assertTrue(second["allowed"])
-            self.assertNotEqual(second["dispatch_id"], first["dispatch_id"])
-            self.assertIn("assets/global/characters/C01_gulu/front.png", second["view_image_paths"])
+            with self.assertRaisesRegex(ImageCanonError, "不允许准备生成：confirmed"):
+                dispatch_keyframe(root, "EP002", "01", "start")
 
     def test_propose_story_uses_existing_cast_and_confirmed_continuity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -503,3 +510,29 @@ class ButlerWorkflowTests(unittest.TestCase):
             self.assertEqual(status["stage"], "no_episode")
             parser = build_parser()
             self.assertIn("status", [action.dest for action in parser._subparsers._group_actions[0]._choices_actions])
+
+    def test_refine_keyframe_accepts_repeated_items(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "refine-keyframe",
+                "--episode",
+                "EP004",
+                "--item",
+                "01/end=开关按母版",
+                "--item",
+                "08/start=窗外必须是夜空",
+            ]
+        )
+        self.assertEqual(
+            args.item,
+            ["01/end=开关按母版", "08/start=窗外必须是夜空"],
+        )
+        self.assertEqual(
+            _parse_refine_item("01/end=开关按母版"),
+            {"shot_id": "01", "frame_kind": "end", "note": "开关按母版"},
+        )
+        self.assertEqual(
+            _parse_refine_item("8:start=窗外必须是夜空"),
+            {"shot_id": "8", "frame_kind": "start", "note": "窗外必须是夜空"},
+        )

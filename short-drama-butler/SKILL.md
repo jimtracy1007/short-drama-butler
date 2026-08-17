@@ -23,7 +23,8 @@ description: Use when initializing or continuing an AI short-drama project, and 
 | 今天不知道写啥 | 用户说「今天不知道写啥」「你出个故事」「随便做一集」时，先运行 `scripts/butler.py propose-story`。若返回 `allowed: false`，先确认上集连续性，不要出故事、不要 `new-episode`。允许时根据已有锁定角色、场景和上集承接，用中文给出 2-3 个本集故事，等用户点头后再 `new-episode --story`。确认前不要建集、不要出图。 |
 | 生产本集资产 | 仅在 AI 故事概要获用户确认后运行 `scripts/butler.py plan-assets`；它先生产 `before_storyboard` 核心资产，剧本分镜确认后再生产 `before_keyframes` 延后资产。出图前必须 `dispatch-asset` 并附上已确认参考图；确认图片后再 `provide-asset` / `confirm-asset`。 |
 | 审核剧本与分镜 | 展示正式剧本和分镜，等待用户确认或按反馈修改；未经确认不得规划关键帧。确认后运行 `scripts/butler.py approve-script`。 |
-| 规划 / 生成关键帧 | 逐镜列出首帧、尾帧、过程帧的数量和用途；方案确认后建立 v2 执行单。任何出图必须先运行 `scripts/butler.py dispatch-keyframe`，把返回路径读进当前对话后再生成。 |
+| 规划 / 生成关键帧 | 逐镜列出首帧、尾帧、过程帧的数量和用途；方案确认后建立 v2 执行单。关键帧必须按帧派子 agent 出图：本镜有几帧就同时派几个子 agent，主 agent 不自己出图。子 agent 先运行 `scripts/butler.py dispatch-keyframe`，原样输出 `brief.text`，再读参考图生成。 |
+| 精修静帧 | 用户可一次指出多张。运行 `refine-keyframe`（多个 `--item`，或单帧 `--shot/--frame/--note`），再按 status 返回的每一帧各派一个子 agent；精修帧优先于尚未开画的镜头。 |
 | 结束一集 / 继续下一集 | 本集定稿后确认连续性记录；创建下一集时自动继承最近一份已确认记录。 |
 | 交给分镜 | 生成/更新 `storyboard-package.md`，随后调用 `$seedance-storyboard-generator`。 |
 | 审核/提升素材 | 确认剧集素材可跨集复用后，迁入全局库并更新索引。 |
@@ -46,6 +47,11 @@ python short-drama-butler/scripts/butler.py plan-assets --episode EP001
 python short-drama-butler/scripts/butler.py dispatch-asset --episode EP001 --name 小鸟
 python short-drama-butler/scripts/butler.py provide-asset --episode EP001 --name 小鸟 --image front=out/bird.png
 python short-drama-butler/scripts/butler.py confirm-asset --episode EP001 --name 小鸟
+python short-drama-butler/scripts/butler.py plan-keyframes --episode EP001
+python short-drama-butler/scripts/butler.py create-execution --episode EP001
+python short-drama-butler/scripts/butler.py refresh-prompts --episode EP001
+python short-drama-butler/scripts/butler.py refine-keyframe --episode EP001 --shot 01 --frame start --note "手再靠近开关"
+python short-drama-butler/scripts/butler.py refine-keyframe --episode EP001 --item 01/start="开关按母版" --item 08/end="窗外必须是夜空"
 python short-drama-butler/scripts/butler.py dispatch-keyframe --episode EP001 --shot 01 --frame start
 python short-drama-butler/scripts/butler.py record-image --episode EP001 --dispatch D-xxx --output out/frame.png
 ```
@@ -58,11 +64,22 @@ python short-drama-butler/scripts/butler.py record-image --episode EP001 --dispa
 
 1. 运行本 Skill 目录中的 `scripts/butler.py inspect` 和 `scripts/butler.py status`，读取 `asset-index.json`、角色圣经、当前剧集和下一步。
 2. 关键帧使用 `butler.py dispatch-keyframe --episode <ID> --shot <镜号> --frame start|middle|end`；新角色/场景/道具使用 `butler.py dispatch-asset --episode <ID> --name <名称>`。
-3. 对返回的每一张 `view_image_paths` 先 `view_image` / 读图，再调用 `$imagegen`。这些图分别约束人物身份、场景、道具或风格。
+3. 先原样输出返回的 `brief.text`（本图故事、本镜引用素材、制作时必须注意），再对每一张 `view_image_paths` 调用 `view_image` / 读图，再调用 `$imagegen`。这些图分别约束人物身份、场景、道具或风格。
 4. `prompt` 必须与派发单完全一致。`allowed` 为 false，或项目已有确认素材但参考图列表为空时，停止出图。
 5. 不要询问用户是否参考已有素材。有确认图就必须用。只有项目里还没有任何确认图片时，才允许按文字圣经画第一批资产。
 6. 旧执行单没有 `schema_version: 2` 时，按 `legacy_unplanned` 处理：禁止继续用旧提示词或 `keyframes/pending/` 出图。
 7. 每一张图都必须回到已确认母版，禁止镜头链式参考（镜头2只参考镜头1、镜头3只参考镜头2）。上一镜不得当作唯一或主身份锁。
+8. 关键帧必须由子 agent 出图：首次、精修、重做都一样。待出的有几帧就同时派几个子 agent；一次精修多张、跨镜也一样，每张一个子 agent。主 agent 不自己 generate、不把参考图读进主对话。等全部 `record-image` 后，主 agent 只审核。
+
+## 子代理出图
+
+每一帧都从母版出图，彼此不互相等待。`butler.py status` 的 `keyframe_work.mode` 为 `spawn_subagents` 时：
+
+- 主 agent：只读 status / inspect，按返回的每一帧各派一个子 agent，等全部 `record-image` 后，对照场景母版、角色母版和分镜审核。通过才 `record-qa`；墙体/开关/开口错了必须 fail 并 `refine-keyframe`，失败几张就派几个子 agent。用户可一次精修多张：先 `refine-keyframe`（多个 `--item`），再按返回的帧各派一个子 agent，主对话不要自己画。
+- 子 agent：只负责一帧。运行 `dispatch-keyframe --shot <镜号> --frame start|middle|end`，先原样输出 `brief.text`，读完全部 `view_image_paths`，prompt 原样 generate，`record-image` 后返回 dispatch_id 与产出路径。禁止 `record-qa`，禁止改另一帧，禁止改 prompt。
+- 5 秒 1 帧派 1 个；10 秒 2 帧派 2 个；三帧例外派 3 个；精修/重做按被重开的帧派，一次点名几张就同时派几个。不要让主 agent 代画出任何一帧。
+
+子 agent 任务应写明：剧集 ID、镜号、帧类型、必须先 `$short-drama-butler`、必须 dispatch 后先输出 `brief.text` 再出图。
 
 禁止（误差会累积：角变长、脸漂移、帽子偏移、桌子比例跑掉）：
 
@@ -70,7 +87,7 @@ python short-drama-butler/scripts/butler.py record-image --episode EP001 --dispa
 镜头1 → 镜头2 → 镜头3 → 镜头4
 ```
 
-推荐 A（最稳）：每一帧都是 `角色母版 + 场景母版 + 道具母版 → 本镜`。
+推荐 A（最稳）：每一帧都是 `角色母版 + 场景母版 + 道具母版 → 本镜`。默认一次 `dispatch-keyframe`，把返回的全部 `view_image_paths` 放进同一次 generate（不超过 5 张）。`generation_mode` 为 `single_pass` 时禁止再拆“先背景后人物”，禁止为补深夜另开空房间，禁止自制构图叠加层或用上一镜产图替换场景母版，也禁止在出图中改脚本或取消重写提示词。本镜若是深夜/黄昏/黎明，场景必须有对应已确认视图（如 `night=`）；没有就先 `dispatch-asset` 补时段母版并 `confirm-asset`，禁止用白天场景图出夜戏。只有超过 5 张或不可拆关系组才拆阶段；纯背景底图阶段只是装不下时的溢出，不是 3 个母版的正常路径。
 
 推荐 B（实战）：本帧参考角色母版（必传，身份锁）、场景母版（必传，空间锁）、画面中的道具母版（必传），上一镜/上一帧仅可选辅助连续性（动作衔接、机位延续、视线、情绪）。上一镜不能是唯一或主身份参考。
 
@@ -126,17 +143,17 @@ python short-drama-butler/scripts/butler.py record-image --episode EP001 --dispa
 
 正式剧本和分镜完成后，**先运行**本 Skill 目录中的 `scripts/validate_director_storyboard.py --storyboard <本集 storyboard.md> --target-seconds <本集目标时长>`。出现 Markdown 表格、6 / 7 秒等非标准镜头、缺少 5 秒 / 10 秒固定标题、总时长不符或缺少全局设定时，必须修正 `storyboard.md` 并重跑校验；校验通过前不得展示或要求用户确认。校验通过后才展示正式剧本和分镜并询问用户是否符合要求、是否要调整；收到明确确认后运行 `scripts/butler.py approve-script` 写入 `creative-review.md`。没有这项确认，不得规划关键帧，更不得使用图片工具生成关键帧。
 
-随后按导演版分镜创建 `keyframe-plan.md`：5 秒或余数镜头固定 `start_only`；10 秒镜头固定 `start_end`。只有要表现不可省略中间状态的 10 秒镜头才能提议 `start_middle_end`，且必须写 `exception_reason`。展示方案时，将每个三帧例外单独问清“是否保留过程帧”；运行 `scripts/butler.py approve-keyframes` 时仅把用户明确同意的镜号写入 `--middle-shot`。未列入该参数的例外自动降为两帧。只有 `assert_keyframe_generation_allowed` 成功时才可生成关键帧。多帧的价值来自清晰的阶段差异和工具支持，不得用近似重复图凑数量；同一镜的图片应明确标注为首 / 过程 / 尾帧，便于交给图生视频工具。
+随后运行 `scripts/butler.py plan-keyframes --episode <ID>`：默认从已确认导演版分镜生成 `keyframe-plan.md`，不必手写 shots.json。5 秒或余数镜头固定 `start_only`；10 秒镜头固定 `start_end`。只有要表现不可省略中间状态的 10 秒镜头才能提议 `start_middle_end`，且必须写 `exception_reason`。展示方案时，将每个三帧例外单独问清“是否保留过程帧”；运行 `scripts/butler.py approve-keyframes` 时仅把用户明确同意的镜号写入 `--middle-shot`。未列入该参数的例外自动降为两帧。只有 `assert_keyframe_generation_allowed` 成功时才可生成关键帧。多帧的价值来自清晰的阶段差异和工具支持，不得用近似重复图凑数量；同一镜的图片应明确标注为首 / 过程 / 尾帧，便于交给图生视频工具。
 
-关键帧执行阶段运行 `scripts/butler.py create-execution`。它从已确认分镜逐镜建立 `keyframe-execution.md` 和 schema v2 的 `keyframe-execution-manifest.json`：保留时长、镜头语言、画面三阶段、台词、声音策略、音效、入点、出点 / 转场、按名称的素材参考和原分镜出图提示词；Markdown 只展示当前确认版，JSON 保存逐阶段输入、哈希、质检和版本历史。不得把它降级为一句动作说明。详细字段见 [references/storyboard-to-keyframes.md](references/storyboard-to-keyframes.md)。
+关键帧执行阶段运行 `scripts/butler.py create-execution`，默认不必提供 details-file。它读取已确认 `storyboard.md`：按「素材参考」解析已确认资产；每帧出图提示词由本帧画面 + 分镜视觉锁 + 已确认资产 + 时段锁 + 背景锁 + 场景道具锁拼装。整体空间当背景；场景母版里已有的固定物按道具处理，禁止新增或糊成一块新结构。自动执行单每帧都从母版出图，不拿上一帧锁姿势。夜戏缺对应场景视图时，`status` 会先要求补母版，避免画错再精修。用户要改画面时用 `refine-keyframe` 追加，可一次多帧；有几张就派几个子 agent 重出，主对话不自己画；并阻塞依赖这些帧的连续性镜头。已有执行单可用 `refresh-prompts` 按分镜重拼提示词、时段母版和母版出图合同。夜戏缺多张场景时段图时，`status` 会逐项列出。Markdown 只展示当前确认版，JSON 保存逐阶段输入、哈希、质检和版本历史。不得把它降级为一句动作说明。详细字段见 [references/storyboard-to-keyframes.md](references/storyboard-to-keyframes.md)。
 
 创建 v2 执行单时，每镜除了人可读的 `asset_references`，还必须给出结构化 `asset_uses`。每项以用户可说的资产 ID、名称或别名作为 `reference`，并明确 `role`（仅 `background`、`character_identity`、`prop_identity`、`lighting`、`composition`、`style`）、`required`，需要时再给 `view_hint` / `facing`、`relationship_group` 和连续性标记。系统将名称或别名解析为唯一的内部资产 ID、已登记视图、项目内相对路径和 SHA-256；名称歧义、未登记素材、缺图或无可用视图时停止该帧，不能猜测或删掉 required 素材。`frame_spec` 还必须明确 `continuity_contract`：没有承接关系时写 `null`；有承接关系时精确指定前序镜号/帧、继承维度和资产 ID，不能从自然语言推断。
 
 用户继续只说名称，不需要输入内部 ID。若用户为某一镜或连续段提供额外参考图，先询问其约束的维度和范围；使用 `register_user_override` 将项目内图片复制到 `references/user/` 并记录 SHA-256。人物身份或道具身份覆盖必须指定唯一 `target_asset_id`；范围只能是单镜、明确镜号列表的连续段或整集。覆盖只替换声明维度，按单镜优先于连续段优先于整集、同范围较新优先；被替代项保留为 `superseded`，不改写资产索引或角色圣经。
 
-调用 `prepare_keyframe_generation` 后，才会为一张帧图保存最多 5 张输入的阶段计划。带连续性合同的帧必须等待前序帧已确认；不可拆的关系组无法装入 5 图时，先登记并由用户确认同一计划的参考板，再重新规划。规划时角色/场景/道具母版是必传身份锁；上一镜只占可选连续性槽，不能顶替母版。超过 5 图时先丢掉上一镜辅助，再考虑分阶段，不得为了链式参考挤掉 required 母版。此函数只准备本地计划，**不调用任何图片、视频或剪辑供应商**。Codex 或其他适配层必须先运行 `scripts/butler.py dispatch-keyframe`（内部调用 `begin_stage_generation`）：它重算每张输入的 SHA-256、冻结提示词与输入并将阶段写为 `generating`，返回唯一的 `dispatch_id` 和 `view_image_paths`。随后适配层必须先把这些路径读进当前对话，再原样交给图片工具，并把带相同 `dispatch_id` 的返回数据交给 `scripts/butler.py record-image`；后者核对提示词、实际输入和哈希后，才将产图写为不可覆盖的工作版本：`episodes/<集>/keyframes/work/KF<镜号>-<帧类型>/rNNN-<阶段>.<扩展名>`。没有参考图路径时禁止调用图片工具。`view_image_paths` 里的角色/场景/道具母版是身份与空间锁；若含上一镜，只作动作、机位、视线、情绪辅助，不得当作唯一或主参考。
+调用 `prepare_keyframe_generation` 后，才会为一张帧图保存最多 5 张输入的阶段计划。默认把能装进 5 张的角色/场景/道具母版打进**同一 generate 阶段**，不要发明“先背景后人物”。只有超过 5 张或不可拆关系组才拆阶段；纯背景底图阶段只是溢出残留。带连续性合同的帧必须等待前序帧已确认；不可拆的关系组无法装入 5 图时，先登记并由用户确认同一计划的参考板，再重新规划。规划时角色/场景/道具母版是必传身份锁；上一镜只占可选连续性槽，不能顶替母版。超过 5 图时先丢掉上一镜辅助，再考虑分阶段，不得为了链式参考挤掉 required 母版。此函数只准备本地计划，**不调用任何图片、视频或剪辑供应商**。Codex 或其他适配层必须先运行 `scripts/butler.py dispatch-keyframe`（内部调用 `begin_stage_generation`）：它重算每张输入的 SHA-256、冻结提示词与输入并将阶段写为 `generating`，返回唯一的 `dispatch_id`、`brief` 和 `view_image_paths`。随后适配层必须先原样输出 `brief.text`，再把这些路径读进当前对话，再原样交给图片工具，并把带相同 `dispatch_id` 的返回数据交给 `scripts/butler.py record-image`；后者核对提示词、实际输入和哈希后，才将产图写为不可覆盖的工作版本：`episodes/<集>/keyframes/work/KF<镜号>-<帧类型>.<扩展名>`，例如 `KF01-start.png`。同一帧再次出图时，旧工作图移到 `keyframes/recovery/KF01-start-r001.png`。没有参考图路径时禁止调用图片工具。`view_image_paths` 里的角色/场景/道具母版是身份与空间锁；若含上一镜，只作动作、机位、视线、情绪辅助，不得当作唯一或主参考。
 
-每次生成后，使用 `scripts/butler.py record-qa` 写入结构化质检。自动质检只有在该阶段所有 required 类别均通过且置信度不低于 0.85 时才可通过；不确定、低置信度或参考板参与的结果必须转给用户审核。质检失败或用户否决时，只重做出错阶段并递增 revision，保留旧图和理由。需要用户主动重做已确认帧时运行 `scripts/butler.py redo-keyframe`；它保留历史、废止旧计划，并将直接连续性依赖帧重新阻塞，直到新锚点确认。最后阶段通过后，系统才写入确认版本 `episodes/<集>/keyframes/final/KF<镜号>-<帧类型>/rNNN.<扩展名>`；该确认帧可成为同镜后续帧或精确指定的连续镜头锚点。
+每次生成后，使用 `scripts/butler.py record-qa` 写入结构化质检。自动质检只有在该阶段所有 required 类别均通过且置信度不低于 0.85 时才可通过；不确定、低置信度或参考板参与的结果必须转给用户审核。质检只锁身份、空间和时段；上一镜辅助图不构成必过的 continuity 门。分镜要求的走位、姿势、视线变化必须通过，不得用上一帧站位否决本帧动作。质检失败或用户否决时，只重做出错阶段并递增 revision，保留旧图和理由。需要用户主动重做已确认帧时运行 `scripts/butler.py redo-keyframe`；它保留历史、废止旧计划，并将直接连续性依赖帧重新阻塞，直到新锚点确认。最后阶段通过后，系统才写入确认版本 `episodes/<集>/keyframes/final/KF<镜号>-<帧类型>.<扩展名>`，例如 `KF01-start.png`；该确认帧可成为同镜后续帧或精确指定的连续镜头锚点。重做时把旧确认图改名为 `KF01-start-r001.png`，当前确认始终是不带版本号的扁平文件。
 
 v2 不创建新的 `keyframes/pending/` 目录。旧执行单缺少 `schema_version: 2` 时标记为 `legacy_unplanned`，仅可查看和人工归档；禁止自动出图、自动迁移、移动或覆盖任何旧 `keyframes/pending/` 文件或旧 Markdown。创建函数也会拒绝覆盖任何已有执行单；需要进入 v2 时，先人工归档旧执行单，再从已确认分镜创建新的 v2 执行单。
 

@@ -13,10 +13,14 @@ sys.path.insert(0, str(SKILL_SCRIPTS))
 
 from keyframe_consistency import (  # noqa: E402
     KeyframeConsistencyError,
+    apply_background_time_views,
     build_generation_plan,
+    infer_time_of_day,
+    is_obsolete_phase_split_plan,
     resolve_applicable_overrides,
     resolve_keyframe_asset_uses,
     select_applicable_overrides,
+    shot_time_of_day,
     validate_continuity_contract,
 )
 
@@ -70,7 +74,7 @@ class KeyframeConsistencyTests(unittest.TestCase):
             resolved = resolve_keyframe_asset_uses(root, [{"reference": "泡泡湾", "role": "background", "required": True}])
 
             self.assertEqual(resolved[0]["selected_view"], "day")
-            self.assertIn("standard views unavailable", resolved[0]["fallback_reason"])
+            self.assertIsNone(resolved[0]["fallback_reason"])
 
     def test_ambiguous_reference_and_missing_image_fail_before_planning(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -177,7 +181,7 @@ class KeyframeConsistencyTests(unittest.TestCase):
             "shot_id": "09",
             "frame_kind": "start",
             "revision": "r001",
-            "path": "keyframes/final/KF09-start/r001.png",
+            "path": "keyframes/final/KF09-start.png",
             "sha256": "anchor",
             "status": "confirmed",
         }
@@ -208,7 +212,7 @@ class KeyframeConsistencyTests(unittest.TestCase):
             "shot_id": "09",
             "frame_kind": "start",
             "revision": "r001",
-            "path": "keyframes/final/KF09-start/r001.png",
+            "path": "keyframes/final/KF09-start.png",
             "sha256": "anchor",
             "status": "confirmed",
         }
@@ -228,7 +232,8 @@ class KeyframeConsistencyTests(unittest.TestCase):
             [f"C{index:02d}" for index in range(1, 5)],
         )
         self.assertEqual(plan["unselected_optional"], [])
-        self.assertIn("continuity", plan["stages"][0]["required_qa_categories"])
+        self.assertNotIn("continuity", plan["stages"][0]["required_qa_categories"])
+        self.assertIn("不得用上一帧站位否决本帧动作", plan["stages"][0]["qa_guidance"])
 
     def test_five_member_group_keeps_masters_instead_of_yielding_to_previous_shot(self) -> None:
         frame_spec = {
@@ -242,7 +247,7 @@ class KeyframeConsistencyTests(unittest.TestCase):
             "shot_id": "01",
             "frame_kind": "start",
             "revision": "r001",
-            "path": "keyframes/final/KF01-start/r001.png",
+            "path": "keyframes/final/KF01-start.png",
             "sha256": "anchor",
             "status": "confirmed",
         }
@@ -304,23 +309,150 @@ class KeyframeConsistencyTests(unittest.TestCase):
             if item.get("role") != "edit_target"
         ]
         self.assertEqual(flattened, ["S01", "S02", "C01", "P01", "C02", "P02"])
-        self.assertEqual([stage["kind"] for stage in plan["stages"]], ["background", "primary_subjects", "secondary_subjects"])
+        self.assertEqual([stage["kind"] for stage in plan["stages"]], ["composite", "secondary_subjects"])
+        self.assertNotIn("continuity", plan["stages"][0]["required_qa_categories"])
+        self.assertIn("continuity", plan["stages"][1]["required_qa_categories"])
         self.assertEqual(
             [
                 [item["asset_id"] for item in stage["input_images"] if item.get("role") != "edit_target"]
                 for stage in plan["stages"]
             ],
-            [["S01", "S02"], ["C01", "P01"], ["C02", "P02"]],
+            [["S01", "S02", "C01", "P01", "C02"], ["P02"]],
         )
 
         optional_secondary = self.required("P03", "prop_identity", subject_tier="secondary")
         optional_secondary["required"] = False
         required_subset = [uses[2], uses[3]]
         plan_with_optional = build_generation_plan("P-phase-optional", {"continuity_contract": None}, required_subset, [], None, [])
-        self.assertEqual(plan_with_optional["stages"][0]["kind"], "background")
-        self.assertEqual(plan_with_optional["stages"][1]["kind"], "primary_subjects")
+        self.assertEqual(len(plan_with_optional["stages"]), 1)
+        self.assertEqual(plan_with_optional["stages"][0]["kind"], "composite")
         plan_with_optional = build_generation_plan("P-phase-optional", {"continuity_contract": None}, required_subset + [optional_secondary], [], None, [])
         self.assertEqual([item["asset_id"] for item in plan_with_optional["unselected_optional"]], ["P03"])
+
+    def test_three_masters_share_one_generate_stage(self) -> None:
+        uses = [
+            self.required("S01", "background"),
+            self.required("C01", "character_identity", subject_tier="primary"),
+            self.required("C04", "character_identity", subject_tier="primary"),
+        ]
+        plan = build_generation_plan(
+            "P-three-masters",
+            {"continuity_contract": None, "prompt": "卧室里咕噜和妈妈说话"},
+            uses,
+            [],
+            None,
+            [],
+        )
+        self.assertEqual(plan["generation_mode"], "single_pass")
+        self.assertEqual(len(plan["stages"]), 1)
+        stage = plan["stages"][0]
+        self.assertEqual(stage["kind"], "composite")
+        self.assertEqual(stage["mode"], "generate")
+        self.assertNotIn("edit_target", [item["role"] for item in stage["input_images"]])
+        self.assertEqual({item["asset_id"] for item in stage["input_images"]}, {"S01", "C01", "C04"})
+        self.assertTrue(stage["prompt"].startswith("卧室里咕噜和妈妈说话"))
+        self.assertIn("时间、光线和窗外氛围以场景母版和本帧提示词为准", stage["prompt"])
+        self.assertNotIn("背景时间必须是深夜", stage["prompt"])
+        self.assertNotIn("不生成任何人物", stage["prompt"])
+
+    def test_force_staged_edit_separates_confirmed_scene_from_primary_characters(self) -> None:
+        uses = [
+            self.required("S01", "background"),
+            self.required("C01", "character_identity", subject_tier="primary"),
+            self.required("C04", "character_identity", subject_tier="primary"),
+        ]
+        anchor = {
+            "shot_id": "01",
+            "frame_kind": "start",
+            "revision": "r001",
+            "path": "keyframes/final/KF01-start.png",
+            "sha256": "anchor",
+            "status": "confirmed",
+        }
+        plan = build_generation_plan(
+            "P-force-staged",
+            {
+                "continuity_contract": {
+                    "predecessor": {"shot_id": "01", "frame_kind": "start"},
+                    "inherit_dimensions": ["space", "character_identity"],
+                    "asset_ids": ["S01", "C01", "C04"],
+                },
+                "force_staged_edit": True,
+                "prompt": "深夜卧室",
+            },
+            uses,
+            [],
+            anchor,
+            [],
+        )
+        self.assertEqual(plan["generation_mode"], "staged_edit")
+        self.assertEqual([stage["kind"] for stage in plan["stages"]], ["background", "primary_subjects"])
+        self.assertEqual([stage["mode"] for stage in plan["stages"]], ["generate", "edit"])
+        self.assertEqual([item["asset_id"] for item in plan["stages"][0]["input_images"]], ["S01"])
+        self.assertEqual(
+            [item["asset_id"] for item in plan["stages"][1]["input_images"] if item.get("asset_id")],
+            ["C01", "C04"],
+        )
+        self.assertEqual(plan["stages"][0]["kind"], "background")
+        self.assertEqual([item["asset_id"] for item in plan["stages"][0]["input_images"]], ["S01"])
+        self.assertNotIn("continuity", [item["role"] for item in plan["stages"][0]["input_images"]])
+        self.assertIn("不生成任何人物", plan["stages"][0]["prompt"])
+        self.assertIn("时间、光线和窗外氛围以场景母版和本帧提示词为准", plan["stages"][0]["prompt"])
+        self.assertNotIn("背景时间必须是深夜", plan["stages"][0]["prompt"])
+        self.assertIn("continuity", plan["stages"][1]["required_qa_categories"])
+        self.assertFalse(is_obsolete_phase_split_plan(plan))
+        self.assertTrue(plan["force_staged_edit"])
+
+    def test_legacy_background_then_character_plan_is_obsolete(self) -> None:
+        obsolete = {
+            "generation_mode": "staged_edit",
+            "force_staged_edit": False,
+            "stages": [
+                {
+                    "kind": "background",
+                    "input_images": [{"role": "background", "asset_id": "S01"}],
+                },
+                {
+                    "kind": "primary_subjects",
+                    "input_images": [
+                        {"role": "edit_target", "source": "previous_stage"},
+                        {"role": "character_identity", "asset_id": "C01"},
+                        {"role": "character_identity", "asset_id": "C04"},
+                    ],
+                },
+            ],
+        }
+        self.assertTrue(is_obsolete_phase_split_plan(obsolete))
+        obsolete["force_staged_edit"] = True
+        self.assertFalse(is_obsolete_phase_split_plan(obsolete))
+
+    def test_night_shot_requires_confirmed_night_scene_view(self) -> None:
+        self.assertEqual(infer_time_of_day("深夜卧室里咕噜怕黑"), "night")
+        self.assertEqual(
+            shot_time_of_day({"storyboard_image_prompt": "月光下的卧室", "frame_prompts": {"start": "深夜"}}),
+            "night",
+        )
+        uses = apply_background_time_views(
+            [{"reference": "卧室", "role": "background", "required": True}],
+            "night",
+        )
+        self.assertEqual(uses[0]["view_hint"], "night")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            front = self.write_file(root, "assets/S02-front.png", b"day")
+            night = self.write_file(root, "assets/S02-night.png", b"night")
+            self.write_index(root, [self.asset("S02", "卧室", "scenes", [("front", front)])])
+            with self.assertRaisesRegex(KeyframeConsistencyError, "night 视图"):
+                resolve_keyframe_asset_uses(
+                    root,
+                    [{"reference": "卧室", "role": "background", "required": True, "time_of_day": "night", "view_hint": "night"}],
+                )
+            self.write_index(root, [self.asset("S02", "卧室", "scenes", [("front", front), ("night", night)])])
+            resolved = resolve_keyframe_asset_uses(
+                root,
+                [{"reference": "卧室", "role": "background", "required": True, "time_of_day": "night", "view_hint": "night"}],
+            )
+            self.assertEqual(resolved[0]["selected_view"], "night")
 
 
 if __name__ == "__main__":

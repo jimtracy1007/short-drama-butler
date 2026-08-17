@@ -39,6 +39,8 @@ from project_files import (
     request_keyframe_regeneration,
     record_story_outline,
     decide_reuse_asset,
+    refine_keyframe_prompts,
+    refresh_execution_prompts,
 )
 from storyboard_dependency import DependencyError, sync_installed_storyboard_overlay
 from workflow_status import episode_status, list_episodes, project_status, propose_story_context
@@ -270,7 +272,7 @@ def _command_approve_script(root: Path, args: argparse.Namespace) -> Any:
 
 
 def _command_plan_keyframes(root: Path, args: argparse.Namespace) -> Any:
-    shots = _load_json_file(Path(args.shots_file))
+    shots = _load_json_file(Path(args.shots_file)) if args.shots_file else None
     plan = create_keyframe_plan(root, args.episode, shots)
     return {
         "keyframe_plan": plan.relative_to(root).as_posix(),
@@ -289,7 +291,7 @@ def _command_approve_keyframes(root: Path, args: argparse.Namespace) -> Any:
 
 
 def _command_create_execution(root: Path, args: argparse.Namespace) -> Any:
-    details = _load_json_file(Path(args.details_file))
+    details = _load_json_file(Path(args.details_file)) if args.details_file else None
     execution = create_keyframe_execution_pack(root, args.episode, details)
     return {
         "keyframe_execution": execution.relative_to(root).as_posix(),
@@ -297,7 +299,53 @@ def _command_create_execution(root: Path, args: argparse.Namespace) -> Any:
     }
 
 
+def _command_refresh_prompts(root: Path, args: argparse.Namespace) -> Any:
+    result = refresh_execution_prompts(root, args.episode)
+    result["status"] = episode_status(root, args.episode)
+    return result
+
+
+def _parse_refine_item(value: str) -> dict[str, str]:
+    """Parse ``01/start=开关按母版`` or ``01:end=妈妈蹲下``."""
+    if "=" not in value:
+        raise ButlerError(f"精修项格式应为 镜号/帧=说明，例如 01/start=开关按母版：{value!r}")
+    location, note = value.split("=", 1)
+    location, note = location.strip(), note.strip()
+    if "/" in location:
+        shot_id, frame_kind = location.split("/", 1)
+    elif ":" in location:
+        shot_id, frame_kind = location.split(":", 1)
+    else:
+        raise ButlerError(f"精修项缺少帧类型：{value!r}")
+    shot_id, frame_kind = shot_id.strip(), frame_kind.strip()
+    if not shot_id or frame_kind not in {"start", "middle", "end"}:
+        raise ButlerError(f"精修项镜号或帧类型不合法：{value!r}")
+    if not note:
+        raise ButlerError(f"精修项必须写明要改的画面：{value!r}")
+    return {"shot_id": shot_id, "frame_kind": frame_kind, "note": note}
+
+
+def _command_refine_keyframe(root: Path, args: argparse.Namespace) -> Any:
+    items = [_parse_refine_item(value) for value in (args.item or [])]
+    single = any([args.shot, args.frame, args.note])
+    if items and single:
+        raise ButlerError("不要同时使用 --item 和 --shot/--frame/--note")
+    if single:
+        if not (args.shot and args.frame and args.note):
+            raise ButlerError("单帧精修需要同时提供 --shot、--frame 和 --note")
+        items = [{"shot_id": args.shot, "frame_kind": args.frame, "note": args.note}]
+    if not items:
+        raise ButlerError("请提供 --shot/--frame/--note，或一次多个 --item 镜号/帧=说明")
+    result = refine_keyframe_prompts(root, args.episode, items)
+    status = episode_status(root, args.episode)
+    result["status"] = status
+    result["next_actions"] = status.get("next_actions") or []
+    return result
+
+
 def _command_record_image(root: Path, args: argparse.Namespace) -> Any:
+    if bool(args.output) == bool(args.error):
+        raise ValueError("record-image 必须且只能提供 --output 或 --error")
     dispatch = _find_dispatch(root, args.episode, args.dispatch)
     result = record_stage_generation(
         root,
@@ -312,6 +360,7 @@ def _command_record_image(root: Path, args: argparse.Namespace) -> Any:
             "prompt": dispatch["prompt"],
             "input_images": dispatch["input_images"],
             "output_path": args.output,
+            "error": args.error,
             "started_at": args.started_at or dispatch["dispatched_at"],
             "completed_at": args.completed_at or dispatch["dispatched_at"],
         },
@@ -341,7 +390,11 @@ def _command_record_qa(root: Path, args: argparse.Namespace) -> Any:
 
 
 def _command_redo_keyframe(root: Path, args: argparse.Namespace) -> Any:
-    return request_keyframe_regeneration(root, args.episode, args.shot, args.frame, args.reason)
+    result = request_keyframe_regeneration(root, args.episode, args.shot, args.frame, args.reason)
+    status = episode_status(root, args.episode)
+    result["status"] = status
+    result["next_actions"] = status.get("next_actions") or []
+    return result
 
 
 def _command_register_override(root: Path, args: argparse.Namespace) -> Any:
@@ -461,7 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan_keyframes = subparsers.add_parser("plan-keyframes", help="按分镜建立关键帧方案")
     plan_keyframes.add_argument("--episode", required=True)
-    plan_keyframes.add_argument("--shots-file", required=True)
+    plan_keyframes.add_argument("--shots-file", help="可选；默认从已确认 storyboard.md 生成")
     plan_keyframes.set_defaults(func=_command_plan_keyframes)
 
     approve_keyframes = subparsers.add_parser("approve-keyframes", help="记录用户确认关键帧方案")
@@ -471,8 +524,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     create_execution = subparsers.add_parser("create-execution", help="建立 v2 关键帧执行单")
     create_execution.add_argument("--episode", required=True)
-    create_execution.add_argument("--details-file", required=True)
+    create_execution.add_argument("--details-file", help="可选；默认从已确认 storyboard.md 拼装出图词和素材")
     create_execution.set_defaults(func=_command_create_execution)
+
+    refresh_prompts = subparsers.add_parser(
+        "refresh-prompts", help="按已确认分镜重拼提示词、时段和母版输入，保留用户精修"
+    )
+    refresh_prompts.add_argument("--episode", required=True)
+    refresh_prompts.set_defaults(func=_command_refresh_prompts)
+
+    refine = subparsers.add_parser("refine-keyframe", help="用户补充画面精修；可一次多帧，每帧一个子 agent")
+    refine.add_argument("--episode", required=True)
+    refine.add_argument("--shot")
+    refine.add_argument("--frame", choices=("start", "middle", "end"))
+    refine.add_argument("--note")
+    refine.add_argument(
+        "--item",
+        action="append",
+        help="一次精修多帧，格式 镜号/帧=说明，可重复，例如 01/start=开关按母版",
+    )
+    refine.set_defaults(func=_command_refine_keyframe)
 
     inspect = subparsers.add_parser("inspect", help="列出已确认素材与剧集")
     inspect.set_defaults(func=_command_inspect)
@@ -494,7 +565,8 @@ def build_parser() -> argparse.ArgumentParser:
     record_image = subparsers.add_parser("record-image", help="登记图片工具的产出为工作版本")
     record_image.add_argument("--episode", required=True)
     record_image.add_argument("--dispatch", required=True)
-    record_image.add_argument("--output", required=True, help="项目内的生成图路径")
+    record_image.add_argument("--output", help="项目内的生成图路径")
+    record_image.add_argument("--error", help="登记该次派发未完成或已取消的原因，不写入图片")
     record_image.add_argument("--tool-request-id")
     record_image.add_argument("--started-at")
     record_image.add_argument("--completed-at")
