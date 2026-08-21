@@ -16,11 +16,75 @@ from validate_director_storyboard import parse_storyboard
 
 
 NO_TEXT_LOCK = "无文字、字幕、Logo、水印、对话气泡。"
-IDENTITY_LOCK = "外貌、服装以角色参考图为准，不得替换角色。"
+IDENTITY_LOCK = (
+    "外貌、服装以角色参考图为准，不得替换角色。"
+    "角色参考图只锁外貌和服装，姿势、站坐蹲和手的位置一律按本帧画面，禁止抄参考图里的站姿或手势。"
+)
 BACKGROUND_LOCK = "场景参考图提供整体空间、光线和远景，当背景用，不要另造场地。"
 SET_PROP_LOCK = (
     "场景母版里已经出现的固定物都按道具处理，各件保持母版中的形状和相对位置；"
     "禁止新增母版没有的固定物，也禁止把多件固定物糊成一块新结构。"
+)
+SET_CONTINUITY_LOCK = (
+    "必须沿用场景母版的墙面、开口和家具摆位，禁止新开窗口、改拱门形状、改床的左右位置。"
+)
+THIS_INSTANT_LOCK = "只画这一瞬间，不要画成同一镜其他时间点的姿势。"
+THIS_STILL_ONLY = "只画上面这一瞬间，不要画本镜后半段动作、对白口型或其他镜头。"
+FIXTURE_TERMS = ("圆窗", "开关", "窗帘", "衣架", "时钟", "床", "门", "窗")
+HOVER_TOKENS = ("悬停", "悬在", "没有按下", "未按下", "不按")
+STYLE_KEEP = (
+    "横屏",
+    "竖屏",
+    "16:9",
+    "9:16",
+    "风格",
+    "电影感",
+    "动画",
+    "画风",
+    "质感",
+    "禁止",
+    "不要文字",
+    "无文字",
+    "字幕",
+    "Logo",
+    "水印",
+    "深夜",
+    "白天",
+    "月光",
+    "夜空",
+    "暖色",
+    "冷色",
+    "灯光",
+    "大灯",
+    "已确认",
+    "锁已确认",
+    "窗外",
+    "空间清晰",
+)
+STYLE_DROP_ACTION = (
+    "抬头",
+    "整理",
+    "看妈妈",
+    "看向",
+    "望向",
+    "蹲",
+    "坐",
+    "站",
+    "挥手",
+    "按下",
+    "爬",
+    "掖",
+    "抬到",
+    "悬停",
+    "走",
+    "跑",
+    "中景",
+    "全景",
+    "近景",
+    "特写",
+    "动作细腻",
+    "反复",
+    "推近",
 )
 TIME_LOCKS = {
     "night": "背景时间为深夜，窗外为夜空，禁止白天、日出、日落、黄昏或橙色天空。",
@@ -70,6 +134,107 @@ def _asset_lock(names: Iterable[str]) -> str:
     return f"必须使用已确认资产：{'、'.join(cleaned)}。{IDENTITY_LOCK}"
 
 
+def _mentioned_fixtures(text: str) -> list[str]:
+    hits: list[str] = []
+    corpus = text or ""
+    for term in FIXTURE_TERMS:
+        if term in corpus and term not in hits:
+            if term == "窗" and ("圆窗" in hits or "窗帘" in hits):
+                continue
+            hits.append(term)
+    return hits
+
+
+def _fixture_lock(still: str, extra_texts: Iterable[str] = ()) -> str:
+    visible = _mentioned_fixtures(still)
+    structure = _mentioned_fixtures(" ".join([still, *[str(item or "") for item in extra_texts]]))
+    parts: list[str] = []
+    if structure:
+        parts.append(
+            f"母版固定物：{'、'.join(structure)}，保持母版形状和相对位置，不要换成别的开口。"
+        )
+    if visible:
+        parts.append(f"本帧必须露出并锁场景母版位置：{'、'.join(visible)}。")
+    if "开关" in visible or "开关" in structure:
+        parts.append("开关画在母版墙面上，不得改到门框、门板或其他位置。")
+        if any(token in still for token in HOVER_TOKENS):
+            parts.append("手指只悬在开关前，不要按下。")
+    return "".join(parts)
+
+
+def _is_push_in(camera: str) -> bool:
+    return any(token in (camera or "") for token in ("推近", "推到", "推进", "推至"))
+
+
+def _camera_lock(camera: str, frame_kind: str) -> str:
+    if frame_kind == "end":
+        framing = "本帧按落幅构图，不要画成起幅。"
+        if _is_push_in(camera):
+            framing += "落幅只是同一空间推近，禁止新开窗口、改拱门、改墙面开口或改床的左右位置。"
+        return framing
+    if frame_kind == "middle":
+        return "本帧按动作中段构图。"
+    framing = "本帧按起幅构图，不要画成落幅。"
+    if _is_push_in(camera):
+        framing += "机位尚未推近，不要画成已经推到的落幅。"
+    return framing
+
+
+def _split_style_clauses(text: str) -> list[str]:
+    parts: list[str] = []
+    buf: list[str] = []
+    for char in text or "":
+        if char in "。；;，,":
+            piece = "".join(buf).strip()
+            if piece:
+                parts.append(piece)
+            buf = []
+        else:
+            buf.append(char)
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _style_lock(image_prompt: str) -> str:
+    """Keep style/time/no-text locks; drop other-frame action mixed into 分镜出图提示词."""
+    kept: list[str] = []
+    for clause in _split_style_clauses(image_prompt):
+        forbidden = clause.startswith("禁止") or clause.startswith("不要")
+        if not forbidden and any(token in clause for token in STYLE_DROP_ACTION):
+            continue
+        if any(token in clause for token in STYLE_KEEP):
+            kept.append(clause.rstrip("。；;"))
+    if not kept:
+        return ""
+    return "分镜画风与禁令：" + "；".join(kept) + "。"
+
+
+def _pose_lock(still: str, frame_kind: str, start_still: str = "") -> str:
+    bits: list[str] = []
+    if any(token in still for token in ("坐在床沿", "坐床沿")):
+        bits.append("必须坐在床沿，不要爬上床、不要钻进被窝、不要站起来。")
+    elif "坐" in still:
+        bits.append("必须保持坐姿，不要改成站立或爬行。")
+    if "蹲" in still:
+        bits.append("画面里写明蹲着的人必须保持蹲姿，不要改成站直。")
+    if any(token in still for token in ("站在", "站着")):
+        bits.append("必须保持站姿，不要改成坐或蹲。")
+    if "掖" in still:
+        bits.append("正在掖被角，不要画成已经躺好或爬上床。")
+    if frame_kind == "end" and start_still:
+        if "蹲" in start_still and not any(token in still for token in ("站", "起身", "站直")):
+            bits.append("未写明站起则延续起幅蹲姿，不要突然站直。")
+        if "坐" in start_still and not any(token in still for token in ("站", "起身", "爬")):
+            bits.append("未写明起身则延续起幅坐姿，不要突然站起来。")
+        if any(token in start_still for token in ("站在", "站着")) and not any(
+            token in still for token in ("坐", "蹲", "躺", "跪下")
+        ):
+            bits.append("未写明坐下则延续起幅站姿。")
+    return "".join(bits)
+
+
 def _time_lock(shot: dict[str, Any], frame_kind: str, extra_texts: Iterable[str]) -> str:
     still = _still_for_frame(shot, frame_kind)
     time_of_day = infer_time_of_day(
@@ -109,28 +274,30 @@ def compose_still_prompt(
 ) -> str:
     """Pack this still, visual locks, named assets, and user notes into one prompt."""
     still = _still_for_frame(shot, frame_kind)
+    start_still = str(shot.get("still_start") or "").strip()
     image_prompt = str(shot.get("image_prompt") or "").strip()
     names = list(asset_names) if asset_names is not None else list(shot.get("asset_names") or [])
     camera = str(camera_movement or shot.get("camera_movement") or "").strip()
-    size = str(shot_size or "").strip()
-    if frame_kind == "end":
-        framing = "本帧按落幅构图。"
-    elif frame_kind == "middle":
-        framing = "本帧按动作中段构图。"
-    else:
-        framing = "本帧按起幅构图。"
+    mentioned_sizes = _mentioned_shot_sizes(camera)
+    size = infer_frame_shot_size(camera, frame_kind) if mentioned_sizes else str(shot_size or "").strip()
     notes = [str(note).strip() for note in (refinements or []) if str(note).strip()]
+    setting = str(parsed.get("setting") or "").strip()
+    extras = [item for item in (setting, *(extra_texts or ())) if str(item or "").strip()]
     parts = [
         str(parsed.get("format") or "").strip(),
         f"本帧画面：{still}" if still else "",
         f"景别：{size}。" if size else "",
-        f"运镜参考：{camera}，{framing}" if camera else framing,
+        _camera_lock(camera, frame_kind),
         _asset_lock(names),
         BACKGROUND_LOCK,
         SET_PROP_LOCK,
-        f"分镜视觉锁，姿势以本帧画面为准：{image_prompt}" if image_prompt else "",
-        _time_lock(shot, frame_kind, extra_texts or ()),
+        SET_CONTINUITY_LOCK,
+        _fixture_lock(still, extras),
+        _pose_lock(still, frame_kind, start_still),
+        _style_lock(image_prompt),
+        _time_lock(shot, frame_kind, extras),
         NO_TEXT_LOCK,
+        f"只画这一瞬间：{still.rstrip('。.')}。{THIS_INSTANT_LOCK}" if still else THIS_INSTANT_LOCK,
         f"用户精修：{'；'.join(notes)}" if notes else "",
     ]
     prompt = _join_parts(parts)
@@ -236,29 +403,39 @@ def build_frame_brief(
     """Pre-generation memory card: this frame's story, masters, and must-watch notes."""
     parsed_shot = storyboard_shot(parsed, str(shot.get("shot_id") or ""))
     still = _brief_still(parsed_shot, shot, frame_kind)
-    motion = str((parsed_shot or {}).get("motion") or shot.get("motion") or "").strip()
-    dialogue = str((parsed_shot or {}).get("dialogue") or shot.get("dialogue") or "").strip()
+    start_still = str(
+        (parsed_shot or {}).get("still_start")
+        or shot.get("still_start")
+        or shot.get("start_state")
+        or ""
+    ).strip()
     label = FRAME_STORY_LABELS.get(frame_kind, frame_kind)
     shot_id = str(shot.get("shot_id") or "").zfill(2)
     story_parts = [f"镜头 {shot_id} {label}。"]
     if still:
         story_parts.append(still)
-    if motion:
-        story_parts.append(f"动作：{motion}")
-    if dialogue and dialogue not in {"无", "本镜无台词。", "本镜无台词", "本镜有对白。", "本镜有对白"}:
-        story_parts.append(f"台词：{dialogue}")
     story = " ".join(story_parts).strip()
     assets = _brief_assets(shot, input_images)
     notes = shot.get("prompt_refinements") or {}
     extra = notes.get(frame_kind) if isinstance(notes, dict) else []
     if isinstance(extra, str):
         extra = [extra]
+    setting = str((parsed or {}).get("setting") or shot.get("scene") or "").strip()
     must_watch = [
+        THIS_STILL_ONLY,
         IDENTITY_LOCK,
         BACKGROUND_LOCK,
         SET_PROP_LOCK,
-        _time_lock(parsed_shot or shot, frame_kind, (shot.get("scene"), shot.get("start_state"), shot.get("end_state"))),
-        "姿势和走位以本帧画面为准，不要用上一帧站位。",
+        SET_CONTINUITY_LOCK,
+        _fixture_lock(still, (setting,)),
+        _pose_lock(still, frame_kind, start_still),
+        THIS_INSTANT_LOCK,
+        _time_lock(
+            parsed_shot or shot,
+            frame_kind,
+            (setting, shot.get("scene"), shot.get("start_state"), shot.get("end_state")),
+        ),
+        "姿势和走位以本帧画面为准，不要用上一帧站位，也不要抄角色参考图的站姿。",
         NO_TEXT_LOCK,
         f"用户精修：{'；'.join(str(note).strip() for note in extra if str(note).strip())}" if extra else "",
         "出图 prompt 必须与派发单完全一致。",
@@ -373,11 +550,46 @@ PLAN_STRATEGIES = {
 }
 
 
+def _mentioned_shot_sizes(camera: str) -> list[str]:
+    """Return size words in order. Do not read 近中景 out of 推近中景."""
+    text = camera or ""
+    if not text:
+        return []
+    occupied = [False] * len(text)
+    hits: list[tuple[int, str]] = []
+    for label in sorted(SHOT_SIZE_LABELS, key=len, reverse=True):
+        start = 0
+        while True:
+            index = text.find(label, start)
+            if index < 0:
+                break
+            start = index + 1
+            if any(occupied[index : index + len(label)]):
+                continue
+            if label in {"近中景", "近景"} and index > 0 and text[index - 1] == "推":
+                continue
+            hits.append((index, label))
+            occupied[index : index + len(label)] = [True] * len(label)
+    hits.sort()
+    return [label for _, label in hits]
+
+
 def infer_shot_size(camera: str) -> str:
-    for label in SHOT_SIZE_LABELS:
-        if label in (camera or ""):
-            return label
-    return (camera or "中景")[:20]
+    sizes = _mentioned_shot_sizes(camera)
+    if not sizes:
+        return (camera or "中景")[:20]
+    if len(sizes) == 1:
+        return sizes[0]
+    return f"{sizes[0]}→{sizes[-1]}"
+
+
+def infer_frame_shot_size(camera: str, frame_kind: str) -> str:
+    sizes = _mentioned_shot_sizes(camera)
+    if not sizes:
+        return infer_shot_size(camera)
+    if frame_kind == "end":
+        return sizes[-1]
+    return sizes[0]
 
 
 def default_keyframe_strategy(duration_seconds: int) -> tuple[str, list[str]]:

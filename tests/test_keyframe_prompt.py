@@ -286,7 +286,7 @@ NIGHT_BOARD = """# 《咕噜怕黑》10秒导演版分镜｜夜景
 素材参考
 咕噜、咕噜妈妈、咕噜房间。
 分镜出图提示词
-16:9横屏，已确认资产咕噜和咕噜妈妈位于已确认资产咕噜房间内，背景时间为深夜，窗外是深蓝近黑的夜空，禁止白天、日出、日落、黄昏或橙色天空；暖色大灯亮着，无文字、字幕、Logo、水印。
+16:9横屏，软萌高品质3D家庭动画电影感，已确认资产咕噜和咕噜妈妈位于已确认资产咕噜房间内，背景时间为深夜，窗外是深蓝近黑的夜空，只有窗帘缝隙透入微弱月光，禁止白天、日出、日落、黄昏或橙色天空；暖色大灯亮着，咕噜坐在床沿反复整理被子后抬头看妈妈，妈妈蹲在床边看他，墙角和窗帘在背景，中景，动作细腻、关系自然、空间清晰，无文字、字幕、Logo、水印、对话气泡。
 """
 
 
@@ -394,9 +394,45 @@ class KeyframePromptTests(unittest.TestCase):
         self.assertIn("禁止新增母版没有的固定物", start)
         self.assertIn("已确认资产：咕噜、咕噜妈妈、咕噜房间", start)
         self.assertNotIn("望向墙角", start)
+        self.assertNotIn("抬头看妈妈", start)
+        self.assertNotIn("整理被子后", start)
         self.assertIn("望向墙角", end)
         self.assertIn("禁止白天", end)
         self.assertNotIn("掖被角", end)
+        self.assertNotIn("整理被子后", end)
+
+    def test_push_in_does_not_become_close_medium_and_keeps_this_instant(self) -> None:
+        from keyframe_prompt import infer_frame_shot_size, infer_shot_size
+
+        camera = "全景缓慢推近中景，最后停在咕噜看向墙角的视线方向。"
+        self.assertEqual(infer_shot_size(camera), "全景→中景")
+        self.assertEqual(infer_frame_shot_size(camera, "start"), "全景")
+        self.assertEqual(infer_frame_shot_size(camera, "end"), "中景")
+        self.assertNotEqual(infer_shot_size(camera), "近中景")
+
+        parsed = parse_storyboard(self.write_storyboard(NIGHT_BOARD))
+        shot = parsed["shots"][0]
+        start = compose_still_prompt(parsed, shot, "start", shot_size="近中景", camera_movement=camera)
+        end = compose_still_prompt(parsed, shot, "end", shot_size="近中景", camera_movement=camera)
+        self.assertIn("景别：全景。", start)
+        self.assertIn("不要画成落幅", start)
+        self.assertIn("只画这一瞬间", start)
+        self.assertIn("本帧必须露出并锁场景母版位置：开关、窗帘、床", start)
+        self.assertIn("必须坐在床沿", start)
+        self.assertIn("必须保持蹲姿", start)
+        self.assertIn("角色参考图只锁外貌", start)
+        self.assertNotIn("最后停在", start)
+        self.assertNotIn("运镜参考", start)
+        self.assertNotIn("抬头看妈妈", start)
+        self.assertNotIn("景别：近中景。", start)
+        self.assertIn("景别：中景。", end)
+        self.assertIn("不要画成起幅", end)
+        self.assertIn("手指只悬在开关前，不要按下", end)
+        self.assertIn("开关画在母版墙面上", end)
+        self.assertIn("禁止新开窗口", end)
+        self.assertIn("延续起幅蹲姿", end)
+        self.assertNotIn("整理被子后", end)
+        self.assertTrue(end.index("只画这一瞬间") > end.index("分镜画风与禁令"))
 
     def test_user_refinement_appends_without_dropping_locks(self) -> None:
         parsed = parse_storyboard(self.write_storyboard(NIGHT_BOARD))
@@ -435,12 +471,17 @@ class KeyframePromptTests(unittest.TestCase):
 
         self.assertIn("掖被角", brief["story"])
         self.assertNotIn("望向墙角", brief["story"])
+        self.assertNotIn("本镜过程", brief["story"])
+        self.assertNotIn("整理被子后看向墙角", brief["story"])
+        self.assertNotIn("台词：", brief["story"])
         self.assertIn("1. 本图故事", brief["text"])
         self.assertIn("2. 本镜引用素材", brief["text"])
         self.assertIn("3. 制作时必须注意", brief["text"])
         self.assertIn("咕噜房间（场景 / night）", brief["text"])
         self.assertIn("禁止新增母版没有的固定物", brief["text"])
         self.assertIn("禁止白天", brief["text"])
+        self.assertIn("不要画本镜后半段", brief["text"])
+        self.assertIn("禁止抄参考图里的站姿", brief["text"])
 
     def test_frame_brief_fills_names_from_resolved_uses_when_dispatch_strips_them(self) -> None:
         brief = build_frame_brief(

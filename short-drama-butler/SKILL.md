@@ -23,7 +23,7 @@ description: Use when initializing or continuing an AI short-drama project, and 
 | 今天不知道写啥 | 用户说「今天不知道写啥」「你出个故事」「随便做一集」时，先运行 `scripts/butler.py propose-story`。若返回 `allowed: false`，先确认上集连续性，不要出故事、不要 `new-episode`。允许时根据已有锁定角色、场景和上集承接，用中文给出 2-3 个本集故事，等用户点头后再 `new-episode --story`。确认前不要建集、不要出图。 |
 | 生产本集资产 | 仅在 AI 故事概要获用户确认后运行 `scripts/butler.py plan-assets`；它先生产 `before_storyboard` 核心资产，剧本分镜确认后再生产 `before_keyframes` 延后资产。出图前必须 `dispatch-asset` 并附上已确认参考图；确认图片后再 `provide-asset` / `confirm-asset`。 |
 | 审核剧本与分镜 | 展示正式剧本和分镜，等待用户确认或按反馈修改；未经确认不得规划关键帧。确认后运行 `scripts/butler.py approve-script`。 |
-| 规划 / 生成关键帧 | 逐镜列出首帧、尾帧、过程帧的数量和用途；方案确认后建立 v2 执行单。关键帧必须按帧派子 agent 出图：本镜有几帧就同时派几个子 agent，主 agent 不自己出图。子 agent 先运行 `scripts/butler.py dispatch-keyframe`，原样输出 `brief.text`，再读参考图生成。 |
+| 规划 / 生成关键帧 | 逐镜列出首帧、尾帧、过程帧的数量和用途；方案确认后建立 v2 执行单。关键帧必须按帧派子 agent 出图：当前这一镜有几帧就同时派几个，做完审核后再开下一镜。子 agent 先运行 `scripts/butler.py dispatch-keyframe`，原样输出 `brief.text`，再读参考图生成。 |
 | 精修静帧 | 用户可一次指出多张。运行 `refine-keyframe`（多个 `--item`，或单帧 `--shot/--frame/--note`），再按 status 返回的每一帧各派一个子 agent；精修帧优先于尚未开画的镜头。 |
 | 结束一集 / 继续下一集 | 本集定稿后确认连续性记录；创建下一集时自动继承最近一份已确认记录。 |
 | 交给分镜 | 生成/更新 `storyboard-package.md`，随后调用 `$seedance-storyboard-generator`。 |
@@ -69,15 +69,15 @@ python short-drama-butler/scripts/butler.py record-image --episode EP001 --dispa
 5. 不要询问用户是否参考已有素材。有确认图就必须用。只有项目里还没有任何确认图片时，才允许按文字圣经画第一批资产。
 6. 旧执行单没有 `schema_version: 2` 时，按 `legacy_unplanned` 处理：禁止继续用旧提示词或 `keyframes/pending/` 出图。
 7. 每一张图都必须回到已确认母版，禁止镜头链式参考（镜头2只参考镜头1、镜头3只参考镜头2）。上一镜不得当作唯一或主身份锁。
-8. 关键帧必须由子 agent 出图：首次、精修、重做都一样。待出的有几帧就同时派几个子 agent；一次精修多张、跨镜也一样，每张一个子 agent。主 agent 不自己 generate、不把参考图读进主对话。等全部 `record-image` 后，主 agent 只审核。
+8. 关键帧必须由子 agent 出图：首次、精修、重做都一样。`status` 返回的是**当前这一镜**的待出帧：本镜有几帧就同时派几个子 agent，做完并审核后再开下一镜。不要把后面还是 planned 的镜头一起派。一次精修多张时，按返回的帧各派一个。主 agent 不自己 generate、不把参考图读进主对话。等全部 `record-image` 后，主 agent 只审核。
 
 ## 子代理出图
 
-每一帧都从母版出图，彼此不互相等待。`butler.py status` 的 `keyframe_work.mode` 为 `spawn_subagents` 时：
+同一镜内各帧同时派、彼此不互相等待；不要把后面 planned 镜头一起派。`butler.py status` 的 `keyframe_work.mode` 为 `spawn_subagents` 时：
 
 - 主 agent：只读 status / inspect，按返回的每一帧各派一个子 agent，等全部 `record-image` 后，对照场景母版、角色母版和分镜审核。通过才 `record-qa`；墙体/开关/开口错了必须 fail 并 `refine-keyframe`，失败几张就派几个子 agent。用户可一次精修多张：先 `refine-keyframe`（多个 `--item`），再按返回的帧各派一个子 agent，主对话不要自己画。
 - 子 agent：只负责一帧。运行 `dispatch-keyframe --shot <镜号> --frame start|middle|end`，先原样输出 `brief.text`，读完全部 `view_image_paths`，prompt 原样 generate，`record-image` 后返回 dispatch_id 与产出路径。禁止 `record-qa`，禁止改另一帧，禁止改 prompt。
-- 5 秒 1 帧派 1 个；10 秒 2 帧派 2 个；三帧例外派 3 个；精修/重做按被重开的帧派，一次点名几张就同时派几个。不要让主 agent 代画出任何一帧。
+- 5 秒 1 帧派 1 个；10 秒这一镜派 2 个；三帧例外这一镜派 3 个；精修/重做按被重开的帧派。当前镜做完再派下一镜。不要让主 agent 代画出任何一帧。
 
 子 agent 任务应写明：剧集 ID、镜号、帧类型、必须先 `$short-drama-butler`、必须 dispatch 后先输出 `brief.text` 再出图。
 
@@ -145,7 +145,7 @@ python short-drama-butler/scripts/butler.py record-image --episode EP001 --dispa
 
 随后运行 `scripts/butler.py plan-keyframes --episode <ID>`：默认从已确认导演版分镜生成 `keyframe-plan.md`，不必手写 shots.json。5 秒或余数镜头固定 `start_only`；10 秒镜头固定 `start_end`。只有要表现不可省略中间状态的 10 秒镜头才能提议 `start_middle_end`，且必须写 `exception_reason`。展示方案时，将每个三帧例外单独问清“是否保留过程帧”；运行 `scripts/butler.py approve-keyframes` 时仅把用户明确同意的镜号写入 `--middle-shot`。未列入该参数的例外自动降为两帧。只有 `assert_keyframe_generation_allowed` 成功时才可生成关键帧。多帧的价值来自清晰的阶段差异和工具支持，不得用近似重复图凑数量；同一镜的图片应明确标注为首 / 过程 / 尾帧，便于交给图生视频工具。
 
-关键帧执行阶段运行 `scripts/butler.py create-execution`，默认不必提供 details-file。它读取已确认 `storyboard.md`：按「素材参考」解析已确认资产；每帧出图提示词由本帧画面 + 分镜视觉锁 + 已确认资产 + 时段锁 + 背景锁 + 场景道具锁拼装。整体空间当背景；场景母版里已有的固定物按道具处理，禁止新增或糊成一块新结构。自动执行单每帧都从母版出图，不拿上一帧锁姿势。夜戏缺对应场景视图时，`status` 会先要求补母版，避免画错再精修。用户要改画面时用 `refine-keyframe` 追加，可一次多帧；有几张就派几个子 agent 重出，主对话不自己画；并阻塞依赖这些帧的连续性镜头。已有执行单可用 `refresh-prompts` 按分镜重拼提示词、时段母版和母版出图合同。夜戏缺多张场景时段图时，`status` 会逐项列出。Markdown 只展示当前确认版，JSON 保存逐阶段输入、哈希、质检和版本历史。不得把它降级为一句动作说明。详细字段见 [references/storyboard-to-keyframes.md](references/storyboard-to-keyframes.md)。
+关键帧执行阶段运行 `scripts/butler.py create-execution`，默认不必提供 details-file。它读取已确认 `storyboard.md`：按「素材参考」解析已确认资产；每帧出图提示词由本帧画面 + 画风/时段/禁令 + 已确认资产 + 背景锁 + 场景道具锁拼装，不把整段动作过程、对白或运镜落幅写进这一张。角色参考图只锁外貌服装，姿势以本帧画面为准。整体空间当背景；场景母版里已有的固定物按道具处理，禁止新增窗口或糊成一块新结构。自动执行单每帧都从母版出图，不拿上一帧锁姿势。夜戏缺对应场景视图时，`status` 会先要求补母版，避免画错再精修。用户要改画面时用 `refine-keyframe` 追加，可一次多帧；有几张就派几个子 agent 重出，主对话不自己画；并阻塞依赖这些帧的连续性镜头。已有执行单可用 `refresh-prompts` 按分镜重拼提示词、时段母版和母版出图合同。夜戏缺多张场景时段图时，`status` 会逐项列出。Markdown 只展示当前确认版，JSON 保存逐阶段输入、哈希、质检和版本历史。不得把它降级为一句动作说明。详细字段见 [references/storyboard-to-keyframes.md](references/storyboard-to-keyframes.md)。
 
 创建 v2 执行单时，每镜除了人可读的 `asset_references`，还必须给出结构化 `asset_uses`。每项以用户可说的资产 ID、名称或别名作为 `reference`，并明确 `role`（仅 `background`、`character_identity`、`prop_identity`、`lighting`、`composition`、`style`）、`required`，需要时再给 `view_hint` / `facing`、`relationship_group` 和连续性标记。系统将名称或别名解析为唯一的内部资产 ID、已登记视图、项目内相对路径和 SHA-256；名称歧义、未登记素材、缺图或无可用视图时停止该帧，不能猜测或删掉 required 素材。`frame_spec` 还必须明确 `continuity_contract`：没有承接关系时写 `null`；有承接关系时精确指定前序镜号/帧、继承维度和资产 ID，不能从自然语言推断。
 
